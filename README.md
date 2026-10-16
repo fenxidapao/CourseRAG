@@ -521,13 +521,19 @@ flowchart TB
 | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | **冻结测试集**（24 题，从未参与调参；语料 1434 块 = 1219 文本 + 215 图像 caption） | faithfulness **0.901 ± 0.022** / answer_relevancy **0.975** / context_precision **0.869** / context_recall **0.948**（3 轮独立回归） | **对外引用的绝对值口径**；`python eval_test.py` 可复现       |
 | **held-out A 组 v2**（38 题 = 30 文本 + 8 图片题；门控 faith ≥0.85 且 recall ≥0.80） | faith **0.915** / relevancy 0.958 / precision 0.824 / recall **0.975** → **PASS** | 只准用它调参                                                 |
-| **图片命中率 top-8**（8 题图片问答）                         | **7/8 = 87.5%**（生产库现状；唯一 MISS=`微信小程序开发实战/p020`，rank=1 为 5/8）。旧 caption 库为 8/8，B3 换描述器后出现回归，修复排在 v1.1 | 期望块按 `image_path` 锚定（`eval_heldout.py` 用 `expected_image` 子串匹配 `image_path`）；题面为自然用户问法。逐题明细由 `python eval_heldout.py` 本地生成（`eval_heldout.py:89` 输出 `eval_results_heldout_A_images.csv`），**产物未随仓库分发，需本地重跑** |
+| **图片命中率 top-8**（8 题图片问答）                         | **8/8 = 100%，全部 rank=1 命中**（v1.1 bge-m3 复测）         | 期望块按 `image_path` 锚定（`eval_heldout.py` 用 `expected_image` 子串匹配）；题面为自然用户问法。逐题明细由 `python eval_heldout.py --a-v2` 本地生成，**产物未随仓库分发** |
 | **held-out B 组**（20 题语料外；门控拒答率 ≥90%）            | **20/20 = 100% → PASS**                                      | 硬拒答 + 接地自检 + 教材路由共同生效                         |
 | **混合检索 vs 纯向量**（隔离 reranker 的 A/B 差值）          | precision **+0.18** / recall **+0.16** / faith +0.09 / relevancy +0.05，四项全正向 | 100 题（`python run_ab.py` 的 A/B 两轮，产物 `eval_results_vector.csv` / `eval_results_hybrid.csv` 各 100 行；**产物未随仓库分发，需本地重跑**）× 697 块历史语料（A/B 当时的块数，见 `config.py` 乱码清洗注释与 `test_retrieval.py` 的块数断言）；**只看差值** |
 | **reranker OFF vs ON**（59 题全量语料）                      | precision +0.120 / relevancy +0.133 / recall +0.096 / faith +0.032，四项全正向 | reranker 救「正确块排 30+」的难 query                        |
 | **性能**（本地推理，数字硬件绑定，跨机不可比）               | fast 全链路 P50 **5.9s** / P95 13.4s；accurate 检索 + 精排段 GPU 稳态 P50 **1.16s**（CPU 基线 21.1s ≈ **18×** 提速）；语义缓存命中 6.4s → **40ms** | 明细与完整演化时间线见本地 `EVALUATION.md`（**不随仓库分发**） |
 
-> ⚠️ 上表数值是**本地模式基线**（生成 llama3.1:8b / 裁判 qwen2.5:7b）的历史实测，
+> **v1.1 云端模式复测（2026-10-16，生成 deepseek-v4.1-flash / 裁判 kimi-k2.6，bge-m3 嵌入）：**
+> 冻结测试集 24 题 faith 0.981 / relevancy 0.931 / precision 0.943 / recall 0.916（0 网络失败）；
+> held-out A v2 38 题 faith 0.996 / relevancy 0.962 / precision 0.922 / recall 0.975 → 门控 PASS；
+> held-out B 组拒答 20/20 = 1.00 → PASS；图片命中率 8/8 全 rank=1。
+> ⚠️ 注意：换生成/裁判模型后与下表**不可直接比较**，两套数字并列只为留痕。
+
+> ⚠️ 下表数值是**本地模式基线**（生成 llama3.1:8b / 裁判 qwen2.5:7b）的历史实测，
 > 用于和当前云端模式做对照，不代表云端模式的复测结果。
 > 检索侧指标（precision / recall）三轮零方差，方差全部来自生成侧（temp 0.2）。
 
