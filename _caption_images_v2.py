@@ -3,10 +3,10 @@
 
 ## 为什么要换（实测依据，不是感觉）
 
-旧链路（`_caption_images.py`）：本地 `qwen2.5vl:7b` + prompt 要「用 2~3 句中文描述这张教材插图」。
+旧链路（已归档的 `_caption_images.py`）：本地 `qwen2.5vl:7b` + prompt 要「用 2~3 句中文描述这张教材插图」。
 这个 prompt 在**结构上**就不会写出文件名 —— 它要的是「描述」，不是「抄录」。
 
-实测（`b1_probe_caption.py` / `b1_probe_ceiling.py`，2026-10-14）：
+实测（B1 caption / 上限探针，已归档；2026-10-14）：
 `微信小程序开发实战` 四张项目结构截图的判别性 token（`tab1.wxml` / `avatar.png` /
 `用户登录` / `比较数字大小`）在**全部 215 条 caption 中出现 0 次**；这四张图在
 `where={"type":"image"}` 专用图像通道里的名次是 **56 / 66 / 67 / 69（分母 98）**。
@@ -14,7 +14,7 @@ B1 的视觉重排因此拿不到候选 —— 瓶颈在索引层，不在排序
 
 ## 两个杠杆分开试，实测结论
 
-`_b3_probe_prompt.py` 在四张 ground-truth 图上跑了三种 prompt（同一个 `qwen3-vl-plus`）：
+B3 prompt 探针（已归档）在四张 ground-truth 图上跑了三种 prompt（同一个 `qwen3-vl-plus`）：
 
     CURRENT(旧 prompt 原文)   3/4
     TRANSCRIBE(纯抄录)        3/4

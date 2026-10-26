@@ -254,7 +254,7 @@ GARBLED_DROP_THRESHOLD = float(os.getenv("GARBLED_DROP_THRESHOLD", "0.3"))
 # 【为什么默认关闭】按本文件 ENUM_EXPAND_ENABLED 留下的教训，检索层改动必须先跑
 # held-out A/B 拿到数字，再决定是否翻转默认值——不能"觉得应该更好"就打开。
 #
-# 【实测读数（2026-10-14，详见 B1_VISUAL_RERANK.md）】
+# 【实测读数（2026-10-14；原始报告与标定脚本已归档到仓库外，不在本仓库内）】
 #   - 文本管线原理上无法区分：判别性 token（个人信息 / 比较数字大小 / avatar.png /
 #     tab1.wxml）在全部 215 条 caption 中出现 **0 次**。
 #   - qwen3-vl-plus 做 4 选 1 + 位置置换：**15/16 命中（随机基线 25%）**，唯一未命中是
@@ -277,14 +277,14 @@ VISUAL_RERANK_TIMEOUT = float(os.getenv("VISUAL_RERANK_TIMEOUT", "60"))
 #                     **校准过**：没有任何一张命中时会给空数组 → 保持文本链路原顺序。
 #   "promote"       — 问「哪张最相关」，把选中的图提到 rank 1。
 #   "slot"          — 只让候选里的图像块互相换位，不越过文本块。
-# ⚠️ 实测（b1_bench.py，6 道像素题）：
+# ⚠️ 实测（B1 标定实验，6 道像素题；脚本已归档）：
 #   "promote" 在 5/6 道「目标图根本不在候选里」的题上**从不弃权**，硬把无关图
 #   （p141/p276/p026）顶到 rank 1 —— 净负收益。相对选择式问法没有校准，问不出「都不对」。
 #   "slot" 在现网 top-8 下基本无效：reranker 截断后池内常只剩 0~1 张图，
 #   而本模块要求 ≥2 张才发问 → 静默跳过。两种旧模式均保留仅为对照。
 VISUAL_RERANK_MODE = os.getenv("VISUAL_RERANK_MODE", "verify")
 # 专用图像通道召回条数（0=关闭该通道，退化为「只用文本链路候选里的图」）。
-# ⚠️ 为什么必须有这个通道（b1_probe_recall.py 实测）：把 RRF 池宽从 16 拉到 200，
+# ⚠️ 为什么必须有这个通道（B1 召回探针实测，脚本已归档）：把 RRF 池宽从 16 拉到 200，
 # 池内图像块从 5 涨到 26，但 6 道题里仍有 5 道的目标图**不进池**——瓶颈不是池宽。
 # 而独立的 where={"type":"image"} 通道能把 p267（rank 6/215）、p045（rank 24/215）
 # 捞出来；纯 RRF 池漏掉了后者。没有它，视觉重排经常「无图可排」。
@@ -294,13 +294,13 @@ VISUAL_RECALL_K = int(os.getenv("VISUAL_RECALL_K", "8"))
 # 洞 S：图像块在索引里的**全部可检索内容**就是 caption（rag_core.load_image_chunks：
 # page_content = caption）。所以描述器写不出什么，检索就永远搜不到什么。
 #
-# 【旧链路实测缺陷】`_caption_images.py` 用本地 qwen2.5vl:7b + prompt「用 2~3 句中文
+# 【旧链路实测缺陷】旧版描述器（已归档的 `_caption_images.py`）用本地 qwen2.5vl:7b + prompt「用 2~3 句中文
 # 描述这张教材插图」。该 prompt 在**结构上**只输出叙述，不逐字抄录图中文字，于是
 # `微信小程序开发实战` 四张项目结构截图的判别性 token（tab1.wxml / avatar.png /
 # 用户登录 / 比较数字大小）在全部 215 条 caption 中出现 **0 次**——图像通道里它们排到
-# 56/66/67/69 名（分母 98）。B1 的视觉重排因此拿不到候选（b1_probe_ceiling.py）。
+# 56/66/67/69 名（分母 98）。B1 的视觉重排因此拿不到候选（B1 上限探针，已归档）。
 #
-# 【换描述器实测（_b3_probe_prompt.py，4 张 ground-truth 图）】
+# 【换描述器实测（B3 prompt 探针，已归档；4 张 ground-truth 图）】
 #   - 旧 prompt 原文 × qwen3-vl-plus          3/4 命中 ← **主杠杆是模型，不是 prompt**
 #   - 纯抄录 prompt × qwen3-vl-plus           3/4
 #   - 描述+抄录（HYBRID）× qwen3-vl-plus      4/4  ← 采用

@@ -2,12 +2,12 @@
 backup_index.py — 索引版本化备份 / 恢复（工程化 P0：T10）
 
 为什么需要它（见 2026-08-24 点评文档 P0「索引备份 / 版本化」）：
-  当前 chroma_db 是单点，重建一次要跑 OCR/切分/嵌入（成本不低）。没有备份，
+  当前索引目录是单点，重建一次要跑 OCR/切分/嵌入（成本不低）。没有备份，
   一次误删或 chroma 格式损坏（历史上有过 SQLite readonly 崩溃）就丢全部索引。
   生产落地必须有「可回滚的索引版本」。
 
 用法：
-  python backup_index.py backup            # 快照 chroma_db -> chroma_db_backup_<ts>_<nchunks>/
+  python backup_index.py backup            # 快照当前索引 -> chroma_db_backup_<ts>_<nchunks>/
   python backup_index.py list              # 列出所有备份（含块数/时间）
   python backup_index.py restore <name>    # 恢复指定备份（先自动备份当前态再覆盖）
 
@@ -21,8 +21,10 @@ import datetime
 
 import chromadb
 
+import config
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(ROOT, "chroma_db")
+SRC = os.path.abspath(os.path.join(ROOT, config.PERSIST_DIRECTORY))
 BACKUP_ROOT = os.path.join(ROOT, "chroma_db_backups")
 
 
@@ -31,7 +33,7 @@ def _now_ts():
 
 
 def _chunk_count():
-    """读当前 chroma_db 块数（不加载嵌入函数，只读集合计数）。"""
+    """读当前索引块数（不加载嵌入函数，只读集合计数）。"""
     if not os.path.isdir(SRC):
         return 0
     try:
@@ -45,7 +47,7 @@ def _chunk_count():
 
 def backup():
     if not os.path.isdir(SRC):
-        print("✗ 当前没有 chroma_db，无法备份（先建库）。")
+        print(f"✗ 当前没有索引目录（{SRC}），无法备份（先建库）。")
         return None
     n = _chunk_count()
     name = f"chroma_db_backup_{_now_ts()}_{n}chunks"
@@ -56,7 +58,7 @@ def backup():
         "name": name,
         "created": _now_ts(),
         "chunk_count": n,
-        "source": "chroma_db",
+        "source": os.path.basename(SRC),
     }
     with open(os.path.join(dest, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
@@ -126,14 +128,14 @@ def restore(name):
         try:
             os.rename(SRC, tmp)
         except OSError as e:
-            print(f"✗ 无法移动当前 chroma_db——可能被 uvicorn/streamlit 等进程占用。")
+            print(f"✗ 无法移动当前索引目录（{os.path.basename(SRC)}）——可能被 uvicorn/streamlit 等进程占用。")
             print(f"  请先关闭占用索引的服务（Ctrl+C）再重试；源目录未被改动。")
             print(f"  详情: {e!r}")
             return False
     shutil.copytree(dest, SRC)
     if os.path.isdir(tmp):
         shutil.rmtree(tmp, ignore_errors=True)
-    print(f"✓ 已恢复 {name} -> chroma_db")
+    print(f"✓ 已恢复 {name} -> {os.path.basename(SRC)}")
     return True
 
 

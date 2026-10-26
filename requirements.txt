@@ -11,7 +11,7 @@
 #  - 注：pypdf 6.16.1，PDF 接入开箱可用。
 
 # ---- 核心直接依赖（替代 langchain 的两块）----
-ollama==0.6.2          # Ollama 官方 SDK：嵌入（nomic-embed-text）+ 生成（llama3.1:8b）
+ollama==0.6.2          # Ollama 官方 SDK：本地嵌入（bge-m3）+ 可选本地生成（llama3.1:8b）
 chromadb==1.5.9        # 向量库原生客户端（PersistentClient）；替代 langchain_chroma
 
 # ---- 应用直接依赖 ----
@@ -30,6 +30,6 @@ transformers>=5.15.0,<6
 
 # ===== 评估（W3）：放弃 ragas——它与 langchain 0.3 全家桶不兼容（0.2.x 与 0.1.22 都会在 import 时
 # 拉取已移除的 langchain_community.chat_models.vertexai，且 pip 会把 0.1.22 自动升回 0.2.x）。
-# 改用 eval_local.py：本机 Ollama 当裁判（复用 rag_core.ollama_chat），自己实现 faithfulness /
+# 改用 eval_local.py：裁判默认走云端、可切本机 Ollama（JUDGE_PROVIDER），自己实现 faithfulness /
 # answer_relevancy / context_precision / context_recall 四个指标。零额外依赖。
 # 因此本项目评估不需要 datasets / nest_asyncio / ragas 任何额外包。

@@ -8,7 +8,7 @@
 一个垂直领域 RAG 问答应用，面向「计算机／数学专业课、课本知识问答」场景：
 把课程笔记与教材 PDF/PPTX 建成知识库，提问时给出**带来源引用**的回答，答案可回溯到具体段落与教材原图。
 
-**运行模式（2026-10 起）**：嵌入与精排留在本机（Ollama），**生成与裁判默认走云端 OpenAI 兼容 API**。
+**运行模式（2026-10 起）**：嵌入（Ollama bge-m3）与精排（sentence-transformers）留在本机，**生成与裁判默认走云端 OpenAI 兼容 API**。
 原因是本机只有 8 GB 显存：本地生成 `llama3.1:8b`（约 4.9 GB）+ 本地裁判 `qwen2.5:7b`（约 4.7 GB）装不下，
 Windows WDDM 不报 OOM，而是把 CUDA 调用挂住（日志长时间无输出、CPU 仍上涨）。
 仍可用 `LLM_PROVIDER=ollama` + `JUDGE_PROVIDER=local` 切回全本地，代价是显存与延迟。
@@ -41,51 +41,57 @@ CourseRAG 的做法是：把课程资料**全部放在本机**建索引，用本
 - ✂️ **递归语义切分**：800 字符 + 150 重叠，含中文分隔符感知，避免切断上下文
 - 🔍 **真混合检索**：向量与自实现 BM25 **各自对全库独立召回** top-50 → RRF 倒数排名融合（候选池 16）→ bge-reranker 精排 top-8
 - 🏷️ **教材级元数据过滤**：问题命中教材关键词时自动路由，向量路与 BM25 路各自带 `where` 过滤后再融合；过滤后候选为空自动降级全库（防过度过滤）；API 与 UI 两个出口可显式指定教材，**MCP 出口不支持教材过滤**（`course_retrieve` 只有 `query` / `top_k` / `mode` 三个入参，见「MCP 工具层」）
-- 🖼️ **多模态语料（caption 路线）**：PyMuPDF bbox 渲染剪裁提取教材内嵌图像（自动合成矢量层、内容哈希去重）+ 本地 qwen2.5-VL 生成中文描述，图像描述作为 image 类型 chunk 与文本**统一索引**
+- 🖼️ **多模态语料（caption 路线）**：PyMuPDF bbox 渲染剪裁提取教材内嵌图像（自动合成矢量层、内容哈希去重）+ 视觉模型生成中文描述（v2 逐字转写 + 概括；默认云端，可切本地），图像描述作为 image 类型 chunk 与文本**统一索引**
 - 📌 **引用溯源**：来源带相关性分数与原文偏移；回答正文内联 `[n]` 上标（半角／全角均可）可点击跳转；命中图像块时引用区展示教材原图
 - 💬 **双出口流式问答**：Streamlit 打字机界面 + FastAPI `POST /query/stream`（SSE）；底层是 ollama `stream=True` 的真实逐 token 回调，**引用列表在生成开始前就送达**
 - 🔄 **Query 改写（多轮指代消解）**：history 非空时先用 LLM（temperature=0）把「历史 + 当前问题」改写为独立检索问题；失败／超时／输出口水话自动回退原问题，单轮零开销
 - 🔌 **MCP 工具层**：基于官方 `mcp` SDK，暴露 `course_retrieve`（是什么）与 `list_documents`（你有什么）两个语义正交工具
 - ➕ **增量索引 + 去重**：稳定 id（`md5(source::start_index)`）自动去重，上传仅增量 upsert；按 source 删除单文档，其余不受影响
 - ⚡ **语义缓存**：问句 embedding 余弦 ≥ 0.93 时跳过检索 + 精排 + 生成直接返回历史答案；索引重建后自动失效
-- 📊 **本地自实现评估**：本机 Ollama 当裁判，四指标（faithfulness / answer_relevancy / context_precision / context_recall），零额外依赖
+- 📊 **自实现评估**：裁判默认走云端（kimi-k2.6），可切回本机 Ollama；四指标（faithfulness / answer_relevancy / context_precision / context_recall），零额外依赖
 - 🧪 **held-out 门控**：A 组（语料内 + 图片题）／B 组（语料外应拒答）／C 组（对抗与注入）三组绝对指标 + 拒答率双门控
 - 📈 **可观测看板 + 反馈闭环**：查询日志落 `.query_log.jsonl`，看板出 KPI / 延迟 P95 / 拒答清单；👎 可回流成评估集且不动冻结基线
 - 🔒 **配置外置 + 多用户预留**：全部参数从 `.env` 读取；鉴权 / IP 限流 / 上传上限已挂载但默认关闭
-- ✅ **测试与 CI**：四套测试 + GitHub Actions 3.11 矩阵（py_compile + 测试 + held-out 检索质量门禁）
+- ✅ **测试与 CI**：6 套测试文件（CI 矩阵跑 core / api / mcp / retrieval 四套；`test_visual_rerank.py`、`test_llm_provider.py` 为本地离线单测）+ GitHub Actions 3.11 矩阵（py_compile + 测试 + held-out 检索质量门禁）
 
 ## 目录结构
 
 ```
 CourseRAG/
-├── config.py          # 所有参数集中从 .env 读取（配置外置；含 HYBRID_ENABLED / BM25_TOP_K）
-├── rag_core.py        # RAG 核心：加载切分 / 嵌入建库 / 混合检索(hybrid_retrieve) + 重排 / 增量索引(add_documents/delete_by_source) / 拼链
-├── rag_search_utils.py# 零依赖纯算法（P2-1 抽出）：分词 / BM25 / RRF 融合 / 稳定 id，供 test_core 独立测试
-├── reranker.py        # bge-reranker 跨编码器重排（混合检索的精排段；默认开——难 query 靠 RETRIEVE_K=50 + reranker 纠正召回失败）
-├── mcp_server.py      # MCP stdio 工具层：官方 mcp SDK（MCPServer，2.x 中 FastMCP 更名），course_retrieve 与 /retrieve 同链路
-├── query_log.py       # P1-3 查询日志：每轮落 .query_log.jsonl
-├── app.py             # Streamlit 演示界面（含来源展示与内联 [n] 引用跳转）
-├── main.py            # FastAPI 服务入口（部署层，与 app.py 共用同一套 rag_core）
-├── api_schemas.py     # FastAPI 请求/响应 Pydantic 模型（Swagger 文档自动生成）
-├── requirements-api.txt  # API 服务最小依赖（不含 streamlit / torch，供 Docker 镜像）
-├── Dockerfile         # 多阶段构建（python:3.11-slim）
-├── docker-compose.yml # 一键部署：Ollama + API 双服务
-├── .dockerignore      # 镜像排除项（data/、chroma_db/、.env 等）
-├── test_core.py       # P2-1 核心算法单测（零依赖，可在任意干净 Python 环境实跑）
-├── eval_local.py      # 本地自实现评估（Ollama 当裁判，4 指标，零额外依赖；取代已废弃的 eval.py）
-├── eval_data.py       # 评估小样本（question + reference 标准答案）
-├── run_ab.py          # 混合检索 A/B 断点续跑 runner（中断后重跑自动续，隔离 reranker 测 BM25 纯贡献）
-├── compare_hybrid.py  # 混合检索 vs 纯向量 A/B 对比（整体 + 区别类子集 + 逐题 Δ + 报告）
-├── data/              # 课程资料（示例 md + 教材/ 子目录：真实教材 PDF/PPTX 课件）
-├── chroma_db/         # 向量库持久化目录（自动生成，已 gitignore）
-├── .query_log.jsonl   # 查询日志（自动生成，已 gitignore）
-├── .env.example       # 配置模板
-└── requirements.txt
+├── README.md / AGENTS.md      # 项目说明 / 新 Agent 入口（先读这两个）
+├── config.py                  # 所有参数集中从 .env 读取
+├── rag_core.py                # 加载切分 / 嵌入建库 / 混合检索 / 精排 / 拼链
+├── rag_search_utils.py        # 零依赖纯算法：分词 / BM25 / RRF / 稳定 id
+├── reranker.py                # bge-reranker 跨编码器精排
+├── visual_rerank.py           # B1 可选视觉重排（默认关闭，见 config.VISUAL_RERANK_*）
+├── semantic_cache.py / grounding.py / llm_provider.py
+├── query_log.py / health.py / feedback_pool.py
+├── app.py / main.py           # Streamlit / FastAPI 两个出口
+├── api_schemas.py / api_security.py
+├── mcp_server.py              # MCP stdio 工具层
+├── dashboard.py / backup_index.py / ingest_ocr.py
+├── _extract_images.py / _caption_images_v2.py  # 图像语料管线（抽图 + caption）
+├── eval_local.py / eval_data*.py              # 评估实现 / 样本 / 冻结集
+├── eval_test.py / eval_heldout.py             # 冻结集回归 / held-out 门控
+├── run_ab.py / compare_hybrid.py              # 混合检索 A/B
+├── test_core.py / test_api.py / test_mcp.py / test_retrieval.py
+├── test_visual_rerank.py / test_llm_provider.py
+├── data/                      # 课程资料 + 教材插图（data/教材/ 为本地版权源文件）
+├── chroma_db_m3/              # 当前活跃索引（bge-m3，1434 块；已 gitignore）
+├── .query_log.jsonl           # 查询日志（运行时生成，已 gitignore）
+├── .env / .env.example        # 本地配置 / 模板
+├── Dockerfile / docker-compose.yml / .dockerignore
+├── requirements*.txt          # 核心 / API / 评估 / reranker 依赖
+├── .github/workflows/         # CI + held-out 门控
+└── start.bat / check_env.py   # Windows 启动与自检
 ```
+
+> 历史交接文档、一次性实验脚本、运行日志、旧索引与个人材料已移到**仓库外**
+> `../CourseRAG-仓库外整理-2026-10-26/`。不要在仓库内找旧口径；新窗口以 README + AGENTS.md 为准。
 
 ## 快速开始
 
-**前置**：Python 3.11+；Ollama 已安装并运行（本地 RAG 的固有前提——模型权重无法打包进仓库）。
+**前置**：Python 3.11+；Ollama 已安装并运行（嵌入 bge-m3 走本机；生成／裁判默认走云端，见 `.env`）。
 下面的路径示例是 **Windows / PowerShell**，Linux 与 macOS 未验证。
 
 ```powershell
@@ -94,23 +100,28 @@ python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# 2. 配置（默认值即可跑通，详见「配置」章节）
+# 2. 配置：模板即 v1.1 口径（云端生成/裁判 + 本地 bge-m3 嵌入）
 cp .env.example .env
+# 填 LLM_API_KEY / JUDGE_API_KEY，或走 ~/.dsh/.credentials.yaml 的 KUAIPAO_API_KEY
 
 # 3. 模型（已拉取可跳过）
 ollama serve
-ollama pull nomic-embed-text
-ollama pull llama3.1:8b
+ollama pull bge-m3
 
 # 4. 启动
 streamlit run app.py
 ```
 
+> **全本地回退**：在 `.env` 设 `LLM_PROVIDER=ollama`、`JUDGE_PROVIDER=local`、
+> `EMBEDDING_MODEL=nomic-embed-text`、`PERSIST_DIRECTORY=./chroma_db`，并拉取
+> `llama3.1:8b` / `qwen2.5:7b`。8 GB 显存下本地生成 + 本地裁判可能把 CUDA 调用挂住（见顶部说明）。
+> 当前库 `chroma_db_m3/` 是 bge-m3 索引（1434 块）；换嵌入模型必须重建索引，不能混用。
+
 **成功信号**（照此验证，不要只看进程是否起来）：
 
 1. 浏览器打开 `http://localhost:8501`
 2. 侧栏确认 `data/` 下示例 md 存在
-3. 点「🔄 全量重建索引（data/ 全部）」，等待索引完成
+3. 侧栏确认索引块数（当前库 `chroma_db_m3/` 应为 1434 块）；**若为空**再点「🔄 全量重建索引（data/ 全部）」
 4. 问 `什么是 ACID？` → **应返回带来源引用的回答**，且引用可展开看到原文片段
 
 Windows 下也可直接双击 `start.bat`：它按 `.\venv\Scripts\python.exe` → `%COURSERAG_PYTHON%` → PATH 中 `python` 的顺序探测解释器，无硬编码路径、无中文注释（GBK 安全），任意 Windows 机器可跑。
@@ -128,8 +139,8 @@ Windows 下也可直接双击 `start.bat`：它按 `.\venv\Scripts\python.exe` �
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-ollama pull nomic-embed-text
-ollama pull llama3.1:8b
+copy .env.example .env      # 填云端 key；全本地回退见上一节
+ollama pull bge-m3
 streamlit run app.py
 ```
 
@@ -144,12 +155,18 @@ streamlit run app.py
 **下表「默认」列逐个取自 `config.py` 的 `os.getenv(变量名, 默认值)`**——即 `.env` 里缺这一项时的实际取值，
 照表填不会与代码行为脱节。留空（`VAR=`）不等于取默认值：数值型变量留空会让 `int("")` / `float("")` 抛错。
 
+> **当前本机 `.env` 覆盖（v1.1 口径）**：`EMBEDDING_MODEL=bge-m3`、`PERSIST_DIRECTORY=./chroma_db_m3`、
+> `LLM_PROVIDER=openai` / `LLM_MODEL=deepseek-v4.1-flash`、`JUDGE_PROVIDER=openai` / `JUDGE_MODEL=kimi-k2.6`。
+> 下表是**代码默认值**（偏本地部署），用于排障和从零部署对照；两套配置不要混用索引。
+> 注意：代码默认 `JUDGE_PROVIDER=local`，但 `JUDGE_MODEL` 的默认值是云端名 `kimi-k2.6`；
+> 没有 `.env` 时请显式设 `JUDGE_MODEL=qwen2.5:7b`（`.env.example` 已给云端/全本地两套写法）。
+
 **模型 / 服务**
 
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama 服务地址 |
-| `EMBEDDING_MODEL` | `nomic-embed-text` | 嵌入模型（走 Ollama） |
+| `EMBEDDING_MODEL` | `bge-m3` | 嵌入模型（走 Ollama；全本地回退可用 `nomic-embed-text`，须重建索引） |
 | `LLM_PROVIDER` | `ollama` | 生成提供方：`ollama`=本地 / `openai`=OpenAI 兼容云端 |
 | `LLM_MODEL` | `llama3.1:8b` | 生成模型名（随 provider 变化；云端推荐 `deepseek-v4.1-flash`） |
 | `LLM_API_BASE` | `https://kuaipao.pro/v1` | 云端 OpenAI 兼容接口（仅 provider=openai） |
@@ -166,7 +183,7 @@ streamlit run app.py
 | `CHUNK_SIZE` | `800` | 每块字符数（教材正文段落约 200-800 字符） |
 | `CHUNK_OVERLAP` | `150` | 块间重叠，避免切断句子 / 上下文 |
 | `DATA_DIR` | `./data` | 课程资料目录 |
-| `PERSIST_DIRECTORY` | `./chroma_db` | 向量库持久化目录 |
+| `PERSIST_DIRECTORY` | `./chroma_db` | 向量库持久化目录（当前 `.env` 指向 `./chroma_db_m3`） |
 | `PDF_MIN_CHARS_PER_PAGE` | `30` | 均字符/页低于此值视为无文字层（扫描版），建库时告警跳过 |
 | `GARBLED_DROP_THRESHOLD` | `0.3` | 块级乱码字符占比超此值 → 整块丢弃，否则剥离乱码保留正文 |
 
@@ -190,11 +207,11 @@ streamlit run app.py
 
 | 环境变量 | 默认 | 作用 |
 |---|---|---|
-| `HARD_REJECT_VECTOR_THRESHOLD` | `0.55` | 向量分低于此值判为语料外 → 硬拒答 |
+| `HARD_REJECT_VECTOR_THRESHOLD` | `0.58` | 向量分低于此值判为语料外 → 硬拒答（bge-m3 重标定） |
 | `HARD_REJECT_RERANK_THRESHOLD` | `0.30` | 精排分低于此值判为语料外 → 硬拒答 |
 | `GROUNDED_VERIFY_ENABLED` | `true` | 接地自检开关 |
 | `GROUNDED_SCORE_THRESHOLD` | `0.60` | 接地自检阈值，未达标记 `low_confidence` |
-| `LOW_CONFIDENCE_THRESHOLD` | `0.69` | fast 模式低置信标记阈值 |
+| `LOW_CONFIDENCE_THRESHOLD` | `0.62` | fast 模式低置信标记阈值（bge-m3 重标定） |
 
 **缓存 / 改写**
 
@@ -261,7 +278,7 @@ curl -N -X POST http://localhost:8000/query/stream -H "Content-Type: application
 > 否则已展示的未验证内容无法撤回。此时 `metadata`（引用 + 拒答）与 `done` 照常推送，
 > 前端可据此展示「正在生成…」。
 
-**实测时序**（本机 RTX 4060 Laptop / 1434 块语料 / n=3；复现脚本 `_sse_bench.py` 是**本地未跟踪文件，不随仓库分发**，克隆本仓库后无法直接复跑该脚本）：
+**实测时序**（本机 RTX 4060 Laptop / 1434 块语料 / n=3；复现脚本原为 `_sse_bench.py`，已随历史实验归档到仓库外，**不随仓库分发**）：
 
 | 模式 | metadata（引用送达） | 首 token | 端到端 |
 |---|---|---|---|
@@ -327,7 +344,7 @@ curl http://localhost:8001/health   # full（8001）
   （`requirements-rerank.txt`）并置 `RERANKER_ENABLED=true`。reranker 权重缓存挂 `huggingface_cache` 卷，
   宿主机已下载过则复用。
 - **非 root 运行**：镜像内以 `uid 10001(app)` 启动。Linux 宿主若挂载目录属主不匹配导致不可写，
-  执行 `sudo chown -R 10001:10001 ./data ./chroma_db`；Windows / macOS Docker Desktop 无需此步。
+  执行 `sudo chown -R 10001:10001 ./data ./chroma_db_m3`；Windows / macOS Docker Desktop 无需此步。
 - **Linux 宿主机差异**：`host.docker.internal` 是 Docker Desktop 特性，Linux 默认不解析。三选一：
   1. compose 里给服务加 `extra_hosts: ["host.docker.internal:host-gateway"]`（推荐）
   2. `network_mode: host`（此时 `OLLAMA_BASE_URL` 写 `http://127.0.0.1:11434`，但 `ports` 映射失效）
@@ -406,14 +423,14 @@ npx -y @modelcontextprotocol/inspector --cli python mcp_server.py --method tools
 ```
 
 任意 MCP 兼容客户端（如 Claude Desktop）按 stdio server 配置 `command` / `args` 即可挂载。
-互操作实测矩阵与协议细节记录在本地 `mcp_interop_evidence.md`（**不随仓库分发**）。
+互操作实测矩阵与协议细节已归档到仓库外 `历史文档/mcp_interop_evidence.md`（**不随仓库分发**）。
 
 ## 运维：索引备份 / 语料接入 / 看板
 
 **索引备份与恢复**（`backup_index.py`，纯文件操作，不依赖 Ollama）：
 
 ```bash
-python backup_index.py backup   # 快照 chroma_db → chroma_db_backup_<时间戳>_<块数>/
+python backup_index.py backup   # 快照当前索引（PERSIST_DIRECTORY，默认 chroma_db_m3）→ chroma_db_backup_<时间戳>_<块数>/
 python backup_index.py list     # 列出所有备份与块数
 python backup_index.py restore  # 先备份当前、再恢复指定备份
 ```
@@ -468,8 +485,8 @@ python eval_heldout.py --bc-only                               # 重跑门控覆
 flowchart TB
     subgraph 离线构建
         A[课程资料<br/>PDF / PPTX / TXT / MD / DOCX] --> B[递归语义切分<br/>800 字符 + 150 重叠]
-        B --> C[嵌入<br/>nomic-embed-text]
-        IMG[教材插图<br/>PyMuPDF bbox 渲染剪裁] --> CAP[qwen2.5-VL<br/>批量中文描述]
+        B --> C[嵌入<br/>bge-m3（本地 Ollama）]
+        IMG[教材插图<br/>PyMuPDF bbox 渲染剪裁] --> CAP[视觉模型 v2<br/>逐字转写 + 概括]
         CAP --> C
         C --> D[(Chroma 向量库<br/>增量索引 + 稳定 id 去重)]
     end
@@ -486,7 +503,7 @@ flowchart TB
         F --> RR[bge-reranker 精排 top-8]
         RR --> GATE[硬拒答 + 接地自检]
         GATE --> P[拼 Prompt<br/>含来源编号]
-        P --> L[llama3.1:8b 生成<br/>内联来源引用]
+        P --> L[生成<br/>默认云端 deepseek-v4.1-flash<br/>或本地 llama3.1:8b]
         L --> ANS[回答 + 来源溯源<br/>分数 / 偏移 / 原图]
     end
 
@@ -499,9 +516,13 @@ flowchart TB
 这样正确块即使向量排名靠后，只要词面匹配也能被 BM25 通道独立捞回——
 这是混合检索相对旧实现有实质增益的原因（见「评估」）。
 
+> 图中是当前默认路径（云端生成 + 本地 bge-m3 嵌入）。全本地回退时生成换回 `llama3.1:8b`；
+> caption 的 v1 短描述（旧 qwen2.5-VL）仍用于嵌入/BM25，v2 长描述用于生成与引用，两者用
+> `IMAGE_EMBED_CAPTIONS_CSV` / `IMAGE_CAPTIONS_CSV` 分离。
+
 ## 评估
 
-纯本地评估，不碰 HuggingFace：裁判 LLM 用本机 Ollama（temperature=0 逼稳定 JSON 输出），embedding 用 `nomic-embed-text`。
+评估链路自实现，不碰 HuggingFace：裁判默认走云端 OpenAI 兼容接口（`JUDGE_PROVIDER=openai`，kimi-k2.6，temperature=0 逼稳定 JSON），可切回本机 Ollama（`JUDGE_PROVIDER=local`）；embedding 走本机 bge-m3。
 
 > **关于 RAGAS**：曾尝试引入，但 0.1.22 / 0.2.x 在 import 时会拉取
 > `langchain_community.chat_models.vertexai`，而 langchain_community 0.3.x 已移除该符号，无法共存
@@ -515,27 +536,29 @@ flowchart TB
 - `context_precision`：召回结果里相关内容是否排在前面
 - `context_recall`：检索是否覆盖了回答问题所需的信息（需 `eval_data*.py` 里的 reference）
 
-### 当前官方基线（对外引用口径）
+### 评估基线（当前 v1.1 云端 + 本地历史对照）
+
+**当前对外引用（v1.1 云端，2026-10-16，生成 deepseek-v4.1-flash / 裁判 kimi-k2.6，bge-m3 嵌入）：**
+
+- 冻结测试集 24 题：faith **0.981** / relevancy 0.931 / precision 0.943 / recall 0.916（0 网络失败）
+- held-out A v2（38 题）：faith **0.996** / relevancy 0.962 / precision 0.922 / recall **0.975** → **PASS**
+- held-out B 组：拒答 **20/20 = 1.00** → **PASS**
+- 图片命中率 top-8：**8/8，全部 rank=1**
+
+> ⚠️ 换生成/裁判模型后与下表**不可直接比较**；下表是本地模式历史基线，只作对照。
 
 | 实验                                                         | 结果                                                         | 口径说明                                                     |
 | ------------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| **冻结测试集**（24 题，从未参与调参；语料 1434 块 = 1219 文本 + 215 图像 caption） | faithfulness **0.901 ± 0.022** / answer_relevancy **0.975** / context_precision **0.869** / context_recall **0.948**（3 轮独立回归） | **对外引用的绝对值口径**；`python eval_test.py` 可复现       |
+| **冻结测试集**（24 题，从未参与调参；语料 1434 块 = 1219 文本 + 215 图像 caption） | faithfulness **0.901 ± 0.022** / answer_relevancy **0.975** / context_precision **0.869** / context_recall **0.948**（3 轮独立回归） | **本地模式历史口径**；`python eval_test.py` 可复现            |
 | **held-out A 组 v2**（38 题 = 30 文本 + 8 图片题；门控 faith ≥0.85 且 recall ≥0.80） | faith **0.915** / relevancy 0.958 / precision 0.824 / recall **0.975** → **PASS** | 只准用它调参                                                 |
 | **图片命中率 top-8**（8 题图片问答）                         | **8/8 = 100%，全部 rank=1 命中**（v1.1 bge-m3 复测）         | 期望块按 `image_path` 锚定（`eval_heldout.py` 用 `expected_image` 子串匹配）；题面为自然用户问法。逐题明细由 `python eval_heldout.py --a-v2` 本地生成，**产物未随仓库分发** |
 | **held-out B 组**（20 题语料外；门控拒答率 ≥90%）            | **20/20 = 100% → PASS**                                      | 硬拒答 + 接地自检 + 教材路由共同生效                         |
 | **混合检索 vs 纯向量**（隔离 reranker 的 A/B 差值）          | precision **+0.18** / recall **+0.16** / faith +0.09 / relevancy +0.05，四项全正向 | 100 题（`python run_ab.py` 的 A/B 两轮，产物 `eval_results_vector.csv` / `eval_results_hybrid.csv` 各 100 行；**产物未随仓库分发，需本地重跑**）× 697 块历史语料（A/B 当时的块数，见 `config.py` 乱码清洗注释与 `test_retrieval.py` 的块数断言）；**只看差值** |
 | **reranker OFF vs ON**（59 题全量语料）                      | precision +0.120 / relevancy +0.133 / recall +0.096 / faith +0.032，四项全正向 | reranker 救「正确块排 30+」的难 query                        |
-| **性能**（本地推理，数字硬件绑定，跨机不可比）               | fast 全链路 P50 **5.9s** / P95 13.4s；accurate 检索 + 精排段 GPU 稳态 P50 **1.16s**（CPU 基线 21.1s ≈ **18×** 提速）；语义缓存命中 6.4s → **40ms** | 明细与完整演化时间线见本地 `EVALUATION.md`（**不随仓库分发**） |
+| **性能**（本地推理，数字硬件绑定，跨机不可比）               | fast 全链路 P50 **5.9s** / P95 13.4s；accurate 检索 + 精排段 GPU 稳态 P50 **1.16s**（CPU 基线 21.1s ≈ **18×** 提速）；语义缓存命中 6.4s → **40ms** | 明细与完整演化时间线已归档到仓库外 `历史文档/EVALUATION.md`（**不随仓库分发**） |
 
-> **v1.1 云端模式复测（2026-10-16，生成 deepseek-v4.1-flash / 裁判 kimi-k2.6，bge-m3 嵌入）：**
-> 冻结测试集 24 题 faith 0.981 / relevancy 0.931 / precision 0.943 / recall 0.916（0 网络失败）；
-> held-out A v2 38 题 faith 0.996 / relevancy 0.962 / precision 0.922 / recall 0.975 → 门控 PASS；
-> held-out B 组拒答 20/20 = 1.00 → PASS；图片命中率 8/8 全 rank=1。
-> ⚠️ 注意：换生成/裁判模型后与下表**不可直接比较**，两套数字并列只为留痕。
-
-> ⚠️ 下表数值是**本地模式基线**（生成 llama3.1:8b / 裁判 qwen2.5:7b）的历史实测，
-> 用于和当前云端模式做对照，不代表云端模式的复测结果。
-> 检索侧指标（precision / recall）三轮零方差，方差全部来自生成侧（temp 0.2）。
+> 本地模式基线口径：生成 llama3.1:8b / 裁判 qwen2.5:7b；检索侧 precision / recall 三轮零方差，
+> 方差全部来自生成侧（temp 0.2）。
 
 ### held-out 门控
 

@@ -1,6 +1,6 @@
 """`visual_rerank` 的离线单测：不调用 VLM、不需要 GPU / Ollama。
 
-覆盖的都是**曾经真的坏过**的地方（见 `B1_VISUAL_RERANK.md` §5），
+覆盖的都是**曾经真的坏过**的地方（见 `visual_rerank.py` 顶部说明），
 加上词面图像通道这条纯本地的召回捷径。
 所以这些用例可以在没有 Ollama、没有 CUDA 的机器上跑。
 

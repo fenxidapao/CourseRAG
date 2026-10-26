@@ -2,7 +2,7 @@
 # CourseRAG 一键部署：API 服务（FastAPI）直连【宿主】Ollama
 #
 # 为什么直连宿主 Ollama（2026-08-22 改版）：
-#   - 宿主已装 Ollama 且模型齐全（nomic-embed-text / llama3.1:8b），
+#   - 宿主已装 Ollama 且模型齐全（默认 bge-m3 / llama3.1:8b；云端模式见 .env），
 #     容器内再拉一套要重新下载 ~5GB 模型，纯浪费
 #   - 端口无冲突：不占宿主 11434（compose 不再映射 ollama 服务）
 #   - API 容器是无状态"壳"，模型/数据全在宿主，镜像小、易换模型
@@ -34,17 +34,24 @@ services:
     environment:
       # 直连宿主 Ollama（Windows Docker Desktop 用 host.docker.internal）
       OLLAMA_BASE_URL: http://host.docker.internal:11434
-      EMBEDDING_MODEL: nomic-embed-text
-      LLM_MODEL: llama3.1:8b
+      # 默认全本地（宿主 Ollama bge-m3 + llama3.1:8b）；在 .env 里改
+      # LLM_PROVIDER=openai / JUDGE_PROVIDER=openai 即可切云端，key 由下面透传。
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      JUDGE_PROVIDER: ${JUDGE_PROVIDER:-local}
+      JUDGE_MODEL: ${JUDGE_MODEL:-qwen2.5:7b}
+      JUDGE_API_KEY: ${JUDGE_API_KEY:-}
       # slim 镜像未装 torch/sentence-transformers → 容器内不启用 reranker
       RERANKER_ENABLED: "false"
       HF_ENDPOINT: https://hf-mirror.com
       DATA_DIR: /app/data
-      PERSIST_DIRECTORY: /app/chroma_db
+      PERSIST_DIRECTORY: /app/chroma_db_m3
       QUERY_LOG_PATH: /app/.query_log.jsonl
     volumes:
       - ./data:/app/data              # 课程资料（挂宿主目录，方便增删）
-      - ./chroma_db:/app/chroma_db    # 向量库持久化
+      - ./chroma_db_m3:/app/chroma_db_m3    # 当前 bge-m3 向量库
     ports:
       - "8000:8000"                   # API 端口（Swagger UI: http://localhost:8000/docs）
     restart: unless-stopped
@@ -60,17 +67,24 @@ services:
     container_name: coursrag-api-full
     environment:
       OLLAMA_BASE_URL: http://host.docker.internal:11434
-      EMBEDDING_MODEL: nomic-embed-text
-      LLM_MODEL: llama3.1:8b
+      # 默认全本地（宿主 Ollama bge-m3 + llama3.1:8b）；在 .env 里改
+      # LLM_PROVIDER=openai / JUDGE_PROVIDER=openai 即可切云端，key 由下面透传。
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      LLM_MODEL: ${LLM_MODEL:-llama3.1:8b}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      JUDGE_PROVIDER: ${JUDGE_PROVIDER:-local}
+      JUDGE_MODEL: ${JUDGE_MODEL:-qwen2.5:7b}
+      JUDGE_API_KEY: ${JUDGE_API_KEY:-}
       # 完整版镜像已装 torch → 容器内开启 reranker（精确模式=向量+BM25+精排）
       RERANKER_ENABLED: "true"
       HF_ENDPOINT: https://hf-mirror.com
       DATA_DIR: /app/data
-      PERSIST_DIRECTORY: /app/chroma_db
+      PERSIST_DIRECTORY: /app/chroma_db_m3
       QUERY_LOG_PATH: /app/.query_log.jsonl
     volumes:
       - ./data:/app/data
-      - ./chroma_db:/app/chroma_db
+      - ./chroma_db_m3:/app/chroma_db_m3
       # reranker 权重缓存卷：宿主机已下载过 bge-reranker-v2-m3 时复用，免二次下载
       - huggingface_cache:/root/.cache/huggingface
     ports:

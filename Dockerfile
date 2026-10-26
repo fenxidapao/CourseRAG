@@ -37,15 +37,15 @@ ENV PYTHONUNBUFFERED=1 \
 # 从 deps 阶段拷贝已装好的依赖（避免重复安装）
 COPY --from=deps /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 
-# 拷贝应用代码（.dockerignore 已排除 data/ chroma_db/ .env 等本地数据）
+# 拷贝应用代码（.dockerignore 已排除 data/ chroma_db*/ .env 等本地数据）
 COPY . .
 
-# 运行时数据目录（data/ 与 chroma_db/ 由 docker-compose 卷挂载覆盖）
-RUN mkdir -p data chroma_db
+# 运行时数据目录（data/ 与 chroma_db_m3/ 由 docker-compose 卷挂载覆盖）
+RUN mkdir -p data chroma_db chroma_db_m3
 
 # 非 root 运行（安全基线）：镜像内进程以 uid 10001 的 app 用户启动，
 # 避免容器逃逸时直接拿到 root。Linux 宿主若挂载目录属主不匹配导致不可写，
-# 请在宿主执行：sudo chown -R 10001:10001 ./data ./chroma_db
+# 请在宿主执行：sudo chown -R 10001:10001 ./data ./chroma_db_m3
 RUN useradd -m -u 10001 app && chown -R app:app /app
 USER app
 

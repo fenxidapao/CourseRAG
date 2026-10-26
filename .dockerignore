@@ -10,7 +10,7 @@ __pycache__/
 
 # 运行时数据（由 docker-compose 卷挂载，不打包进镜像）
 data/
-chroma_db/
+chroma_db*/
 .chat_history.json
 .query_log.jsonl
 

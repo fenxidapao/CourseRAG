@@ -5,9 +5,9 @@
 chroma_db/
 chroma_db_backup*/
 chroma_db_broken*/
-# 对照索引（换描述器前的旧 caption 库，用于 A/B 复跑，见 B3 说明；可重建，不入库）
+# 旧对照索引（换描述器前的 caption 库，已移到仓库外；可重建，不入库）
 chroma_db_v1/
-# C1 对照索引（bge-m3 / 1024 维；与 nomic 768 维库并存做 A/B，可重建，不入库）
+# 当前活跃索引（bge-m3 / 1024 维；不入库，可重建）
 chroma_db_m3/
 __pycache__/
 *.pyc
@@ -22,7 +22,7 @@ venv/
 # 运行 / 诊断日志（勿提交）
 *.log
 
-# 内部复盘 / 交接文档（公开仓库不需要，保留在本地即可）
+# 内部复盘 / 交接文档（已移到仓库外；规则保留用于防止再次误提交）
 # 注：以下规则原先只写在 .git/info/exclude（不随 clone 传播），2026-10-14 迁入本文件，保证新 clone 同样干净。
 CourseRAG-交接文档-*.md
 CourseRAG-对话总结-*.md
@@ -43,7 +43,7 @@ eval_compare.md
 # 评估重测备份（旧 59 题 CSV/日志归档，2026-08-22）
 _eval_prev_59/
 
-# 归档目录与显存测试临时产物（本地留档，不入库；原写在 .git/info/exclude）
+# 旧归档目录与显存测试临时产物（已移到仓库外；规则保留用于防止再次误提交）
 _archive/
 NVIDIA Corporation/
 
