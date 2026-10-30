@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 import config
 import rag_core
-from eval_data_paper import PAGE_CASES
+from eval_data_paper import PAGE_CASES, PAGE_CASES_ALL
 
 METRICS = ("faithfulness", "answer_relevancy", "context_precision", "context_recall")
 
@@ -45,8 +45,9 @@ def _write_csv(path, rows):
         w.writerows(rows)
 
 
-def run_generate(limit=0):
-    cases = PAGE_CASES[:limit] if limit else PAGE_CASES
+def run_generate(limit=0, cases_mode="base"):
+    base = PAGE_CASES_ALL if cases_mode == "all" else PAGE_CASES
+    cases = base[:limit] if limit else base
     rows = []
     for i, c in enumerate(cases, 1):
         t0 = time.time()
@@ -151,9 +152,11 @@ def main():
     ap.add_argument("--stage", choices=["generate", "judge"], required=True)
     ap.add_argument("--gen-csv", default="", help="judge 阶段指定输入 CSV（默认取最新）")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 题（冒烟用）")
+    ap.add_argument("--cases", default="base", choices=["base", "all"],
+                    help="base=原 15 题四指标；all=30 题只看引用页")
     args = ap.parse_args()
     if args.stage == "generate":
-        run_generate(args.limit)
+        run_generate(args.limit, args.cases)
     else:
         run_judge(args.gen_csv, args.limit)
 

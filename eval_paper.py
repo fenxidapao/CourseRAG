@@ -17,7 +17,8 @@ import itertools
 import sys
 
 import config
-from eval_data_paper import HELDOUT_IN, HELDOUT_OUT, IN_DOMAIN, OUT_DOMAIN, PAGE_CASES
+from eval_data_paper import (HELDOUT_IN, HELDOUT_OUT, IN_DOMAIN, OUT_DOMAIN,
+                            PAGE_CASES, PAGE_CASES_ALL)
 from rag_core import retrieve_and_rerank
 
 
@@ -42,9 +43,10 @@ def _write_csv(path, rows):
     print(f"csv={path}")
 
 
-def run_page(mode="accurate"):
+def run_page(mode="accurate", cases="all"):
     rows, paper_hit, page_hit, strict = [], 0, 0, 0
-    for c in PAGE_CASES:
+    case_list = PAGE_CASES_ALL if cases == "all" else PAGE_CASES
+    for c in case_list:
         docs = retrieve_and_rerank(c["q"], force_no_rerank=(mode != "accurate"))
         papers = {d.metadata.get("paper_id") for d in docs}
         pages = {(d.metadata.get("paper_id"), d.metadata.get("page")) for d in docs}
@@ -67,10 +69,15 @@ def run_page(mode="accurate"):
             "top1_page": top.metadata.get("page") if top else "",
             "top1_section": (top.metadata.get("section") or "")[:60] if top else "",
         })
-    n = len(PAGE_CASES)
+    n = len(case_list)
     print(f"page cases={n} paper_hit@8={paper_hit}/{n}={paper_hit/n:.3f} "
           f"page_hit@8={page_hit}/{n}={page_hit/n:.3f} "
           f"page_strict@1={strict}/{n}={strict/n:.3f}")
+    if cases == "all" and rows:
+        b = rows[:len(PAGE_CASES)]
+        print(f"  base15: paper_hit@8={sum(r['paper_hit@8'] for r in b)}/{len(b)} "
+              f"page_hit@8={sum(r['page_hit@8'] for r in b)}/{len(b)} "
+              f"page_strict@1={sum(r['page_strict@1'] for r in b)}/{len(b)}")
     _write_csv(_out_csv("page"), rows)
 
 
@@ -185,13 +192,15 @@ def main():
     ap.add_argument("--heldout", action="store_true")
     ap.add_argument("--grid", default=None, metavar="SCAN_CSV")
     ap.add_argument("--mode", default="accurate", choices=["accurate", "fast"])
+    ap.add_argument("--cases", default="all", choices=["base", "all"],
+                    help="页级题集：base=原 15 题，all=30 题（默认）")
     ap.add_argument("--vec-thr", type=float, default=None)
     ap.add_argument("--rr-thr", type=float, default=None)
     args = ap.parse_args()
 
     print(f"[profile] {config.profile_summary()}  reranker={config.RERANKER_ENABLED}")
     if args.group == "page":
-        run_page(args.mode)
+        run_page(args.mode, cases=args.cases)
     elif args.grid:
         run_reject_grid(args.grid)
     elif args.heldout:

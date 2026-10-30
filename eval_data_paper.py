@@ -47,6 +47,58 @@ PAGE_CASES = [
      "expected_pages": [9], "reference": "仅图情领域、仅两个模型、训练不充分、提问方式影响结果", "kind": "method"},
 ]
 
+# v3.1 P2（2026-10-30）：题集 15 → 30。原 15 题只覆盖 3 篇，这里给其余 15 篇各补 1 题，
+# 全部按 normalized 产物核对过事实与页码；只用于页级/引用页指标，拒答门控仍用原 15+5 题集。
+PAGE_CASES_EXT = [
+    # RAG（原论文）
+    {"q": "RAG 模型把哪两类记忆结合起来？", "paper_id": "23e3249e9a1e",
+     "expected_pages": [1], "reference": "预训练参数记忆 + 非参数化外部记忆", "kind": "method"},
+    # RAG 综述
+    {"q": "这篇 RAG 综述把范式发展分为哪三类？", "paper_id": "396a0fadeb4c",
+     "expected_pages": [1], "reference": "Naive RAG / Advanced RAG / Modular RAG", "kind": "method"},
+    # DPR
+    {"q": "在开放域 Natural Questions 上，DPR 与 ORQA 的准确率各是多少？", "paper_id": "3e67fc1a9977",
+     "expected_pages": [2], "reference": "41.5% vs 33.3%", "kind": "number"},
+    # Lost in the Middle
+    {"q": "论文发现相关信息出现在长上下文的什么位置时模型表现最好？", "paper_id": "653b29619eae",
+     "expected_pages": [1], "reference": "开头或结尾最好，中间显著下降", "kind": "finding"},
+    # Ragas
+    {"q": "Ragas 提供的是哪一类 RAG 评估（是否需要人工参考答案）？", "paper_id": "6c24762a3f27",
+     "expected_pages": [1], "reference": "reference-free（无需参考答案）评估", "kind": "method"},
+    # GraphRAG
+    {"q": "GraphRAG 主要解决传统 RAG 在哪类问题上的不足？", "paper_id": "730f1a9f38d1",
+     "expected_pages": [1], "reference": "面向整篇语料的全局问题（query-focused summarization）", "kind": "finding"},
+    # Sentence-BERT
+    {"q": "SBERT 把 10,000 句里找最相似句对的耗时从 65 小时降到多少？", "paper_id": "92366d22fc05",
+     "expected_pages": [1], "reference": "约 5 秒", "kind": "number"},
+    # MinerU
+    {"q": "MinerU 基于哪套模型完成文档内容抽取？", "paper_id": "bf0260a6105e",
+     "expected_pages": [1], "reference": "PDF-Extract-Kit", "kind": "method"},
+    # Self-RAG
+    {"q": "Self-RAG 用什么机制让模型自适应检索并自我评估生成？", "paper_id": "d9eaa1398aba",
+     "expected_pages": [1], "reference": "reflection tokens（反思标记）+ 自反思", "kind": "method"},
+    # HyDE
+    {"q": "HyDE 的核心做法是什么？", "paper_id": "dc0ae3c5584e",
+     "expected_pages": [1], "reference": "先生成假设文档，再编码其向量做检索", "kind": "method"},
+    # Seven Failure Points
+    {"q": "这篇经验报告总结了多少个 RAG 系统的失败点？", "paper_id": "e5f7855c1233",
+     "expected_pages": [1], "reference": "7 个", "kind": "number"},
+    # FiD
+    {"q": "FiD 在哪些开放域问答基准上取得当时最好结果？", "paper_id": "f1ee7e927c3f",
+     "expected_pages": [1], "reference": "Natural Questions 与 TriviaQA", "kind": "finding"},
+    # ColBERT（深页）
+    {"q": "ColBERT 做重排时比 BERT 模型快多少倍、FLOPs 少多少？", "paper_id": "2e487d9b96e3",
+     "expected_pages": [2], "reference": ">170× 加速、14,000× 更少 FLOPs", "kind": "number"},
+    # QLoRA（深页）
+    {"q": "最小的 Guanaco 模型（7B）需要多少显存，比 26GB 的 Alpaca 高多少分？", "paper_id": "33a4e757c19d",
+     "expected_pages": [2], "reference": "5 GB；高 20 多个百分点", "kind": "number"},
+    # M3-Embedding（深页）
+    {"q": "M3-Embedding 处理 8192 长度文本时，批大小可以提升多少倍？", "paper_id": "eb38e53565da",
+     "expected_pages": [5], "reference": "20 倍以上", "kind": "number"},
+]
+
+PAGE_CASES_ALL = PAGE_CASES + PAGE_CASES_EXT
+
 # 域内 20 题（可答）：15 题页级问题 + 5 题综述型
 IN_DOMAIN = [c["q"] for c in PAGE_CASES] + [
     "Transformer 的编码器和解码器分别由哪些层组成？",
