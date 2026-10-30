@@ -5,7 +5,27 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from paper_normalize import audit, normalize_paper
+from paper_normalize import audit, normalize_paper, normalize_math_spacing
+
+
+def test_math_spacing_decimal():
+    assert normalize_math_spacing("$0 . 9 8$") == "$0.98$"
+
+
+def test_math_spacing_multidigit_decimal():
+    assert normalize_math_spacing("$1 1 . 8 \\%$") == "$11.8 \\%$"
+
+
+def test_math_spacing_numeric_brace():
+    assert normalize_math_spacing("$10 ^ { - 9 }$") == "$10 ^{-9}$"
+
+
+def test_math_spacing_leaves_letters():
+    assert normalize_math_spacing("$\\text { a b }$") == "$\\text { a b }$"
+
+
+def test_math_spacing_leaves_plain_text_columns():
+    assert normalize_math_spacing("34.5 36.6") == "34.5 36.6"
 
 
 def _write(path, obj):

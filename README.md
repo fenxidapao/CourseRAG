@@ -126,18 +126,24 @@ Streamlit 侧引用卡直接显示「《标题》第 N 页 · 章节」+ 页图�
 `eval_paper_quality.py` 两段式：`--stage generate`（qwen2.5:7b 答题）→ `ollama stop` →
 `--stage judge`（glm4:9b 打分，直接复用 `eval_local` 四指标）。15 题页级集，0 题硬拒：
 
-| 指标 | 读数 |
-|---|---|
-| faithfulness | **0.672** |
-| answer_relevancy | **1.000**（15 题全 1.0，本集上无区分度） |
-| context_precision | **0.802** |
-| context_recall | **0.633** |
-| answer_cite_page_acc | **0.800（12/15）** |
+| 指标 | 归一化后（22:16） | 归一化前（21:19） |
+|---|---|---|
+| faithfulness | 0.603 | **0.672** |
+| answer_relevancy | 1.000（全 1.0，无区分度） | 1.000 |
+| context_precision | 0.801 | 0.802 |
+| context_recall | 0.633 | 0.633 |
+| answer_cite_page_acc | **0.867（13/15）** | 0.800（12/15） |
 
-- 三处引用页未中：Q3 正文写了「第 7 页」却漏 `[n]`（且 β2 又答成 0.999）；Q6 引到第 20 页（另一篇论文的块）；
-  Q9 引到第 5 页（擦边块只出现 350GB，正确来源在第 8 页）。
-- **四指标宜看趋势**：本地 9B 裁判在长上下文上会假阴性——抽检 Q6/Q14/Q15 答案肉眼正确却判 0。
-  另注意 `JUDGE_LOCAL_REPEAT_PENALTY` 从 1.3 降到 1.1 才让裁判恢复正常判定（见 `config.py` 注释与实现记录）。
+- 归一化指 MinerU 公式数字拆字修复（`$0 . 9 8$` → `$0.98$`）：数学段内拆字已归零，索引 1324→1323 块。
+  检索层不受影响：paper_hit@8 1.000 / page_hit@8 1.000 / strict@1 0.867；拒答 90% / 域内误拒 0%。
+- 归一化后三处引用页未中：Q8（LoRA 秩 r，引到第 11 页，期望 10）、Q9（引到第 5 页，期望 1/8），
+  外加 Q3 页码虽对、数值仍错（见下）。
+- **Q3 仍未答对**：上下文已含 `0.98`，但 7B 在 8 块上下文里忽略排在最前的短块，稳定"推测"成 0.999。
+  把最相关块移到末尾时 Q3 3/3 答对，但全量模拟 15 题 cite 从 0.867 掉到 0.733（4 题回退）→ 不改顺序，
+  记为已知限制。无 `[n]` 的答案 0/15，引用契约本身达标。
+- **双裁判对照**（同一批 15 条答案）：glm4:9b faith 0.603 / recall 0.633；
+  qwen2.5:7b faith 0.874 / recall 0.967。qwen 明显更宽松（Q14/Q15 列表题 glm4 判 0、qwen 判 1.0；
+  Q3 真错答 glm4 判 0.0、qwen 仍给 0.4）。四指标**只报趋势**，不对外承诺绝对值。
 
 ### 本地裁判校准（2026-10-30）
 
@@ -169,6 +175,8 @@ Streamlit 侧引用卡直接显示「《标题》第 N 页 · 章节」+ 页图�
 ### 已知坑
 
 - MinerU 2.7.6 默认走 HuggingFace，本机 hf-mirror 常 429 → 默认 `MINERU_MODEL_SOURCE=modelscope`。
+- MinerU 会把公式数字拆成单字符（`$\beta _ { 2 } = 0 . 9 8$`）；归一化阶段已在 `$...$` 内合并，
+  规则改动后用 `paper_ingest.py --renormalize` 重跑（不重跑 MinerU）再 `paper_index.py --rebuild`。
 - `content_list.json` 的 bbox 是 **0–1000 归一化**坐标，`middle.json` 才是 PDF 点；归一化阶段已换算。
 - 中文提问英文论文时向量分偏低（实测 0.53），阈值需按题集标定，别沿用课程值。
 - 换嵌入模型 / 改切分参数 / 改 caption 后必须 `paper_index.py --rebuild`，旧索引不可混用。

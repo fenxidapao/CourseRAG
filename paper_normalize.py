@@ -127,7 +127,34 @@ def _clean_text(text):
     """只去控制符/零宽字符；保留 LaTeX、希腊字母和中文标点。"""
     text = text or ""
     text = text.replace("\u200b", "").replace("\ufeff", "").replace("\xa0", " ")
-    return "".join(ch for ch in text if ch == "\n" or ch == "\t" or ord(ch) >= 32)
+    text = "".join(ch for ch in text if ch == "\n" or ch == "\t" or ord(ch) >= 32)
+    return normalize_math_spacing(text)
+
+
+# MinerU 会把公式里的数字拆成单字符加空格（实测 18 篇 192/2829 块，小数被拆 27 块）：
+#   $\beta _ { 2 } = 0 . 9 8$ → 检索到的是 "0 . 9 8"，模型只能猜，稳定答成 0.999。
+# 只在 $...$ 内合并"数字/小数点两侧的空格"，字母内容一律不动（否则 \text{f o o} 会粘成 foo）。
+_MATH_SEG = re.compile(r"\$[^$]+\$")
+_NUM_GAP = re.compile(r"(?<=[\d.])\s+(?=[\d.])")
+_NUM_BRACE = re.compile(r"\{\s*([^{}]*?)\s*\}")
+
+
+def _fix_math_segment(seg):
+    body = _NUM_GAP.sub("", seg[1:-1])
+    body = re.sub(r"\^\s*\{", "^{", body)
+
+    def _brace(m):
+        inner = m.group(1)
+        if re.search(r"\d", inner) and re.fullmatch(r"[-+]?[\d.\s]+", inner):
+            return "{" + re.sub(r"\s+", "", inner) + "}"
+        return m.group(0)
+
+    return "$" + _NUM_BRACE.sub(_brace, body) + "$"
+
+
+def normalize_math_spacing(text):
+    """只改 $...$ 内的数字拆字：`0 . 9 8` → `0.98`、`{ - 9 }` → `{-9}`。"""
+    return _MATH_SEG.sub(lambda m: _fix_math_segment(m.group(0)), text or "")
 
 
 def _item_caption(item):
@@ -214,7 +241,7 @@ def normalize_paper(content_list_path, middle_path, pdf_path, paper_id, sha256, 
                         used[i] = True
                         break
             text = _item_text(item)
-            table_html = item.get("table_body") or ""
+            table_html = normalize_math_spacing(item.get("table_body") or "")
             image_path = _item_image_path(item)
             # MinerU 会给出无 span 的空文本块（本样例 4 个）；入块只会制造空 chunk
             if not text and not table_html and not image_path:

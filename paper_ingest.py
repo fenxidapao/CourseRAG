@@ -320,6 +320,39 @@ def ingest_dir(raw_dir=None, only_new=False, retry_failed=False, max_pages=None,
     return results
 
 
+def renormalize_one(pdf):
+    """用缓存的 MinerU 产物重跑归一化（不重跑解析）；归一化规则改动后用。"""
+    pdf = Path(pdf)
+    sha = sha256_file(pdf)
+    pid = paper_id(sha)
+    state = load_state(pid) or _new_state(pdf, sha)
+    out = mineru_adapter.find_outputs(PARSED / pid)
+    if not out["content_list"]:
+        return "no-parse"
+    data = normalize_paper(out["content_list"], out["middle"], pdf, pid, sha,
+                           meta=_load_meta(sha))
+    write_normalized(data, NORMALIZED / f"{pid}.json")
+    total, _, _ = audit(data)
+    _update(state, status="normalized", stage="normalized",
+            pages=data["n_pages"], blocks=total, error="")
+    return "renormalized"
+
+
+def renormalize_all(raw_dir=None, paper=None):
+    pdfs = list_papers(raw_dir)
+    if paper:
+        needle = str(paper).lower()
+        pdfs = [p for p in pdfs if needle in p.name.lower()]
+    results = {}
+    for pdf in pdfs:
+        sha = sha256_file(pdf)
+        pid = paper_id(sha)
+        results[pid] = renormalize_one(pdf)
+        print(f"{pid} {results[pid]}")
+    write_manifest()
+    return results
+
+
 def main():
     ap = argparse.ArgumentParser(description="论文 PDF → MinerU → normalized")
     ap.add_argument("--dir", default=str(RAW))
@@ -330,7 +363,12 @@ def main():
     ap.add_argument("--device", default=None)
     ap.add_argument("--paper", default=None)
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--renormalize", action="store_true",
+                    help="用缓存解析产物重跑归一化（不跑 MinerU），规则改动后用")
     args = ap.parse_args()
+    if args.renormalize:
+        renormalize_all(raw_dir=args.dir, paper=args.paper)
+        return
     ingest_dir(
         raw_dir=args.dir, only_new=args.only_new, retry_failed=args.retry_failed,
         max_pages=args.max_pages, dry_run=args.dry_run, device=args.device,
