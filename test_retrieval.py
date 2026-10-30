@@ -20,6 +20,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# 本文件锁定课程版语义（默认 profile 已切 paper）；必须在 import config 之前设置
+os.environ["APP_PROFILE"] = "course"
+
 import config
 import rag_core
 

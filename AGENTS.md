@@ -5,23 +5,54 @@
 
 ## 1. 项目一句话
 
-垂直领域 RAG：课程笔记 / 教材 PDF·PPTX 建库，问答带来源引用（文本段落 + 教材原图）。
-当前 v1.1 口径（2026-10-16 起）：嵌入与精排在本机，生成与裁判默认走云端；
-仍可切回全本地。核心链路自实现，不依赖 LangChain。
+论文库 RAG（v2.1）：MinerU 解析论文 PDF → 页/块结构 → 页内切分 → 索引，
+回答与引用精确到《论文名》第 N 页，点引用可看页图 + bbox 高亮。
+课程版仍保留（`APP_PROFILE=course`），核心链路自实现，不依赖 LangChain。
 
-## 2. 当前权威状态（2026-10-26）
+## 2. 当前权威状态（2026-10-30，v3 定稿）
 
-- 活跃索引：`chroma_db_m3/`，嵌入 `bge-m3`，**1434 块**（1219 文本 + 215 图像 caption）。
-- 当前 `.env` 覆盖：`EMBEDDING_MODEL=bge-m3`、`PERSIST_DIRECTORY=./chroma_db_m3`、
-  `LLM_PROVIDER=openai` / `deepseek-v4.1-flash`、`JUDGE_PROVIDER=openai` / `kimi-k2.6`。
-- v1.1 云端复测（对外引用以 README「评估」为准）：
-  冻结集 24 题 faith **0.981** / rel 0.931 / prec 0.943 / recall 0.916；
-  held-out A v2（38 题）faith **0.996** / recall **0.975** → PASS；
-  B 组拒答 **20/20**；图片命中 **8/8**（全部 rank=1）。
-  换生成/裁判模型后与本地模式数字**不可直接比较**。
-- 测试：6 套测试文件；CI 跑 `test_core / test_api / test_mcp / test_retrieval`，
-  `test_visual_rerank / test_llm_provider` 为本地离线单测。
-- 旧交接文档（HANDOVER / EVALUATION / INTERVIEW 等）已移出仓库，**不要引用其中的旧数字**。
+- 默认 profile：`APP_PROFILE=paper`；集合 `paper_rag`；索引 `./chroma_db_papers`。
+- 论文库：**18 篇 / 289 页 / 2834 块 → 1324 块 chunk**（1200 字切分；2026-10-29 由 3 篇扩容）。
+  `--audit`：缺页 0、跨页 0、缺章节 20（1.5%）。
+- 阈值（论文库专用）：`vec=0.40 / rerank=0.20 / low=0.50`；
+  18 篇池下 20 域外 + 20 域内门控：**拒答 90%（18/20）、域内误拒 0%**；
+  两道漏拒（BERT MLM 0.702/0.740、Mamba 0.478/0.341）与域内最低分重叠，阈值不可分，需接地判官。
+  负样本已按扩容重标（RAG / Llama 2 MMLU 变域内 → 换 DoRA / KTO），旧 95% 与新 90% 非同题集，不可比。
+  held-out 10+10：800 切分（3 篇）域外 100%、**域内误拒 20%**；
+  1200 切分（18 篇，2026-10-30 只跑一次）域外 **100%**、域内误拒 **10%（1/10，论文作者/期刊题被精排 0.133 拦下）**
+  → 仍未达 5% 目标，按纪律不回调阈值。
+- 页级评测 15 题（仍只覆盖原 3 篇，检索池 18 篇）：paper_hit@8 1.000 / page_hit@8 1.000 / page_strict@1 **0.867**（扩容前 0.933）。
+- 回答质量（2026-10-30，15 题、qwen2.5:7b 生成 / glm4:9b 裁判）：faith **0.672** / rel 1.000 /
+  prec 0.802 / recall 0.633 / **answer_cite_page_acc 0.800（12/15）**；裁判在长上下文有假阴性，看趋势即可。
+  `JUDGE_LOCAL_REPEAT_PENALTY` 已由 1.3 降到 1.1（1.3 会把逐字支持的陈述判 false）。
+- 本地模型（v3 定稿）：生成 `LLM_PROVIDER=ollama` / `LLM_MODEL=qwen2.5:7b`（稳态 8.2 s/题，峰值 7737/8188 MiB）；
+  裁判 `JUDGE_PROVIDER=local` / `JUDGE_MODEL=glm4:9b`，但 **paper 下 `GROUNDED_VERIFY_ENABLED` 默认 false**
+  （8 GB 卡上 7B 生成 + 9B 裁判无法同驻）；关的只是"生成后复核"，检索前硬拒答阈值照常生效，
+  所以门控 90% 是**纯阈值口径**。显式 `GROUNDED_VERIFY_ENABLED=true` 仍可开启。
+  `OLLAMA_NUM_CTX=8192` **必须设**：默认 4096 会截断 8 块上下文（实测导致 121 个课题 / 28.4 BLEU 答错）。
+  裁判选型：glm4:9b 在 30 对手写集 96.7%（FA 1/15、FR 0/15）、12 条真实回答 FA 1/6、FR 0/6；
+  qwen2.5:7b 手写集 93.3% 但真实回答 FA 5/6（被高估），gemma3:4b 63.3%。qwen3 系列不能当裁判（思考链吃满 `num_predict`）。
+  关闸实测代价：7B 对同一题（β2 取值）部分跑次答成 0.999（原文 0.98，也有跑次答对），
+  裁判同文判定不稳定（跨轮精度约 50%），故只保留开关、不做默认硬门控。
+  8GB 装不下生成+裁判，串行换入实测 4.2~5s；精排 + glm4:9b + 8192 峰值 7761 MiB。
+- 引用编号：paper 模式下 context 每段前直接标 `[n]`（`rag_core._compose_prompt`），否则模型会数错段号、答对但引错页。
+- MinerU 2.7.6 在 **`E:\mineru_venv`**（ASCII；中文路径下 fasttext 打不开 Unicode venv），
+  `.env` 里 `MINERU_PYTHON=E:/mineru_venv/Scripts/python.exe`；模型源默认 modelscope。
+- 课程版：tag `v1.1-course-final` / 分支 `archive/course-v1.1`；课程索引 `chroma_db_m3` 未动。
+- 测试：`test_paper_normalize / test_paper_chunk / test_paper_citation / test_api_papers / test_config_profile` 已入 CI；
+  离线全量 **84 passed**。
+- 断点与恢复指引：仓库外 `CourseRAG-实现记录.md` 末尾「断点」节（先读它）。
+
+## 2.1 未完成（恢复后从这里开始）
+
+- v3 P0 已完成：paper 默认关接地门 + `test_config_profile.py` + 文档口径。
+- v3 P1：`eval_paper_quality.py`（四指标 + `answer_cite_page_acc`，两段跑）；**未开始**。
+- v3 P2：`eval_paper.py --group reject --heldout`（1200 切分）只跑一次；分批本地 commit（push 等用户点头）。
+- 仍未闭：云端裁判 key 401（带接地的 UI 验收待重跑）；held-out 域内误拒 20%（800 切分）未达标；
+  关闸后 7B 的数值错答会直接返回（见 §2）；最终 commit/push 未做。
+- 历史（已完成，留档）：M5 的 qwen3:4b/llama3.1:8b 读数已被 v3 的 qwen2.5:7b 方案取代；
+  `qwen3:8b` 未下载（用户决定不急），8B 档延迟/显存 UNVERIFIED。
+  M6 的解析抽检 15/15、MCP paper e2e、CI、Docker slim 981 MB `/health` 200 均已完成。
 
 ## 3. 建议阅读顺序
 
@@ -36,11 +67,13 @@
 |---|---|
 | 核心 | `config.py`、`rag_core.py`、`rag_search_utils.py`、`reranker.py`、`visual_rerank.py`、`semantic_cache.py`、`grounding.py`、`llm_provider.py` |
 | 出口 | `app.py`（Streamlit）、`main.py`（FastAPI）、`api_schemas.py`、`api_security.py`、`mcp_server.py` |
-| 数据 / 索引 | `data/`（md + `images/` + `教材/`）、`chroma_db_m3/`（活跃索引） |
-| 语料管线 | `_extract_images.py`（抽图）、`_caption_images_v2.py`（caption） |
-| 评估 | `eval_local.py`、`eval_data*.py`、`eval_test.py`、`eval_heldout.py`、`run_ab.py`、`compare_hybrid.py` |
+| 数据 / 索引 | `data/papers/`（raw/parsed/normalized/meta/_state）、`chroma_db_papers/`（活跃索引）；课程索引 `chroma_db_m3/` 归档 |
+| 论文管线 | `mineru_adapter.py`、`paper_ingest.py`、`paper_normalize.py`、`paper_chunker.py`、`paper_index.py`、`page_render.py` |
+| 课程管线 | `_extract_images.py`（抽图）、`_caption_images_v2.py`（caption） |
+| 评估 | 论文：`eval_data_paper.py`、`eval_paper.py`；课程：`eval_local.py`、`eval_data*.py`、`eval_test.py`、`eval_heldout.py`、`run_ab.py`、`compare_hybrid.py` |
 | 运维 | `backup_index.py`、`ingest_ocr.py`、`dashboard.py`、`check_env.py` |
-| 测试 | `test_*.py`（6 套） |
+| 前端 | `frontend/`（Vite + React + AntD；`npm run dev`，proxy `/api` → 127.0.0.1:8000） |
+| 测试 | 课程 6 套 + 论文 4 套（`test_paper_*`、`test_api_papers`） |
 
 ## 5. 常用命令（PowerShell）
 
@@ -62,7 +95,20 @@ python test_core.py
 python -m pytest test_api.py test_mcp.py test_visual_rerank.py test_llm_provider.py -v
 python -m pytest test_retrieval.py -v        # 需 Ollama + 已建索引
 
-# 评估
+# 论文库（v2.1）
+python paper_ingest.py --dir data/papers/raw --only-new   # MinerU 解析 → normalized
+python paper_index.py --rebuild                            # normalized → 索引
+python paper_index.py --audit                              # 100% 有页 / 0 跨页
+python eval_paper.py --group page --gate                   # 页级评测 15 题
+python eval_paper.py --group reject --scan                 # 阈值扫描
+python eval_paper.py --group reject --gate                 # 拒答门控
+python eval_paper.py --group reject --heldout              # held-out 只跑一次
+python -m pytest test_paper_normalize.py test_paper_chunk.py test_paper_citation.py test_api_papers.py -v
+
+# 前端（论文库）
+cd frontend; npm run dev      # Vite proxy /api → 127.0.0.1:8000
+
+# 课程版评估（旧口径，仍可用）
 python eval_test.py                         # 冻结测试集 24 题
 python eval_heldout.py --a-v2               # A 组 v2 + 图片命中率
 python eval_heldout.py --bc-only            # B/C 拒答

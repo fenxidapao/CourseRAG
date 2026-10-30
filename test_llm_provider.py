@@ -338,14 +338,20 @@ def test_judge_chat_local_uses_jadge_model(monkeypatch):
     monkeypatch.setattr(config, "JUDGE_MODEL", "qwen2.5:7b")
     seen = {}
 
-    def fake_ollama(messages, temperature, model):
+    def fake_ollama(messages, temperature, model, max_tokens=None, repeat_penalty=None):
         seen["model"] = model
         seen["temperature"] = temperature
+        seen["max_tokens"] = max_tokens
+        seen["repeat_penalty"] = repeat_penalty
         return "本地裁判"
 
     monkeypatch.setattr(llm_provider, "_ollama_chat", fake_ollama)
     assert llm_provider.judge_chat([{"role": "user", "content": "x"}]) == "本地裁判"
     assert seen["model"] == "qwen2.5:7b"
+    # 本地裁判必须有输出上限，防止重复循环写满上下文（2026-10-30 实测 40960 token / 545s）
+    assert seen["max_tokens"] == config.JUDGE_LOCAL_MAX_TOKENS
+    # 重复惩罚同理：glm4:9b 长 JSON 会循环重复 → 截断 → 解析失败被当"不接地"拒答
+    assert seen["repeat_penalty"] == config.JUDGE_LOCAL_REPEAT_PENALTY
     assert seen["temperature"] == 0.0
 
 
@@ -368,12 +374,38 @@ def test_grounding_uses_provider_not_direct_ollama(monkeypatch):
 
     def fake_judge(messages, temperature=0.0):
         calls.append(temperature)
-        return '{"statements": [{"statement": "A", "supported": true}], "score": 1.0}'
+        return ('{"statements": [{"statement": "A", "supported": true, '
+                '"evidence": "上下文 A"}], "score": 1.0}')
 
     monkeypatch.setattr(llm_provider, "judge_chat", fake_judge)
     out = grounding.verify_grounded("上下文 A", "回答 A")
     assert calls, "grounding 必须调用 llm_provider.judge_chat"
     assert out["grounded"] is True and out["score"] == 1.0
+
+
+def test_grounding_trims_context_to_budget(monkeypatch):
+    """真 bug 回归：8 块上下文 ≈1 万 token 撑爆裁判 num_ctx，400 被当成"不接地"。
+
+    裁剪必须优先保住与回答共享词汇的段，并保持原始顺序。
+    """
+    import grounding
+    monkeypatch.setattr(config, "GROUNDED_CONTEXT_MAX_CHARS", 400)
+    monkeypatch.setattr(config, "JUDGE_PROVIDER", "openai")
+    seen = {}
+
+    def fake_judge(messages, temperature=0.0):
+        seen["prompt"] = messages[-1]["content"]
+        return '{"statements": [{"statement": "A", "supported": true, "evidence": "目标事实"}], "score": 1.0}'
+
+    monkeypatch.setattr(llm_provider, "judge_chat", fake_judge)
+    irrelevant = "无关段落" + "ABCD" * 100
+    relevant = "目标事实：beta2 取 0.98"
+    context = f"{irrelevant}\n\n{relevant}"
+    grounding.verify_grounded(context, "beta2 取 0.98")
+
+    assert relevant in seen["prompt"], "相关段必须保留"
+    assert "ABCD" * 50 not in seen["prompt"], "无关长段应被裁掉"
+    assert len(grounding._trim_context(context, "beta2 取 0.98", 400)) < len(context)
 
 
 def test_eval_local_judge_call_delegates(monkeypatch):

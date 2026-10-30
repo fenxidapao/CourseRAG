@@ -1,4 +1,4 @@
-# CourseRAG · 专业课/课本问答助手
+# CourseRAG · 论文库问答（v2.1）
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688?logo=fastapi&logoColor=white)
@@ -8,8 +8,10 @@
 一个垂直领域 RAG 问答应用，面向「计算机／数学专业课、课本知识问答」场景：
 把课程笔记与教材 PDF/PPTX 建成知识库，提问时给出**带来源引用**的回答，答案可回溯到具体段落与教材原图。
 
-**运行模式（2026-10 起）**：嵌入（Ollama bge-m3）与精排（sentence-transformers）留在本机，**生成与裁判默认走云端 OpenAI 兼容 API**。
-原因是本机只有 8 GB 显存：本地生成 `llama3.1:8b`（约 4.9 GB）+ 本地裁判 `qwen2.5:7b`（约 4.7 GB）装不下，
+**运行模式（2026-10 起）**：嵌入（Ollama bge-m3）与精排（sentence-transformers）留在本机。
+论文库（默认 profile）走**本地生成 `qwen2.5:7b`**，**生成后接地复核默认关闭**（8 GB 卡装不下第二个裁判模型）；
+课程版（v1.1）仍默认云端生成/裁判，可随时切回全本地。
+换原因很简单：本机只有 8 GB 显存，生成模型 + 另一个裁判模型装不下，
 Windows WDDM 不报 OOM，而是把 CUDA 调用挂住（日志长时间无输出、CPU 仍上涨）。
 仍可用 `LLM_PROVIDER=ollama` + `JUDGE_PROVIDER=local` 切回全本地，代价是显存与延迟。
 
@@ -18,7 +20,182 @@ Windows WDDM 不报 OOM，而是把 CUDA 调用挂住（日志长时间无输出
 
 RAG 核心（切分 / 加载 / 嵌入 / 向量检索 / 词面检索 / 融合 / 精排 / 接地自检）与评估体系均为自实现，
 RAG 核心链路直接依赖仅 `ollama` + `chromadb` + `sentence-transformers` 三项，已彻底移除 LangChain 全家桶
-（完整运行依赖见 `requirements.txt`，共 9 项直接依赖）。
+（完整运行依赖见 `requirements.txt`，共 10 项直接依赖）。
+
+## 论文库模式（v2.1，默认 `APP_PROFILE=paper`）
+
+把「课程笔记 RAG」改成「论文库 RAG」：MinerU 解析 PDF → 页/块结构 → 页内切分 → 索引，
+回答与引用**精确到《论文名》第 N 页**，点引用可看该页渲染图并高亮原文块。
+课程版仍在：`APP_PROFILE=course` 切回原链路（索引 `chroma_db_m3` / 集合 `course_rag`）。
+
+### 快速开始
+
+```bash
+# 1) 仅 MinerU 用独立 venv（主环境不 import mineru）
+python -m venv venv-mineru            # Python 3.10–3.13
+venv-mineru/Scripts/pip install "mineru[pipeline]==2.7.6"
+# 中文用户名/中文仓库路径下 fasttext 打不开 Unicode 路径时，改建到 ASCII 盘：
+#   python -m venv E:\mineru_venv
+# 并在 .env 设 MINERU_PYTHON=E:/mineru_venv/Scripts/python.exe
+
+# 2) 主环境依赖 + 启动
+pip install -r requirements.txt       # 含 pymupdf，Streamlit 页图渲染用
+ollama serve
+streamlit run app.py                  # 论文库 UI（默认 paper profile）
+uvicorn main:app --host 127.0.0.1 --port 8000
+
+# 3) 解析 + 索引（CLI 与 UI/API 等价）
+python paper_ingest.py --dir data/papers/raw --only-new   # MinerU 解析 → normalized
+python paper_index.py --rebuild                            # normalized → 1324 块（18 篇，1200 字切分）
+python paper_index.py --audit                              # 100% 有页 / 0 跨页
+```
+
+React 前端（可选，Streamlit 已覆盖同一链路）：
+
+```bash
+cd frontend
+npm install
+npm run dev          # http://127.0.0.1:5173，/api 代理到 127.0.0.1:8000
+```
+
+聊天接口流式走 POST + `fetch`/`ReadableStream`（不用 `EventSource`，因其不支持自定义请求体与请求头）。
+
+### 目录与数据边界
+
+```
+data/papers/
+├── raw/          # 原始 PDF（gitignored，不提交）
+├── parsed/<id>/  # MinerU 输出（content_list.json / middle.json / *_origin.pdf）
+├── normalized/   # paper_blocks/1 JSON（bbox 统一为 PDF 点）
+├── meta/         # 标题/作者/年限/URL/许可/sha256
+├── _state/       # 状态机真源（discovered→queued→parsing→parsed→normalized→indexed/failed）
+└── manifest.csv  # 由 state 派生
+```
+
+- `paper_id = sha256[:12]`；重复上传按 sha256 去重，`--only-new` 命中缓存不重解析。
+- **不提供整本 PDF 下载**：只有 `/papers/{id}/pages/{page}.png` 页图（可选 bbox 高亮）。
+- 解析失败只记 `failed`，不静默降级（`PAPER_FALLBACK_ENABLED=true` 才会走 pdftext 兜底）。
+
+### 接口（FastAPI）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/papers` | 批量上传 PDF，落盘入队，返回 `queued`；单 worker 逐篇解析 |
+| GET | `/papers` / `/papers/{id}` | 列表 / 详情（状态、页数、块数、耗时） |
+| POST | `/papers/{id}/reparse` | 重解析（先删该 sha 的索引） |
+| DELETE | `/papers/{id}?delete_raw=` | 删索引与状态；`delete_raw=true` 才删 PDF |
+| GET | `/papers/{id}/blocks?page=n` | 归一化块（类型/文本/bbox/章节） |
+| GET | `/papers/{id}/pages/{page}.png?blocks=b1,b2` | 页图 + 红框高亮 |
+
+MCP 出口：`paper_retrieve`（论文库主入口）、`list_documents`；`course_retrieve` 保留为课程兼容别名。
+Streamlit 侧引用卡直接显示「《标题》第 N 页 · 章节」+ 页图。
+
+### 论文库实测（2026-10-29，18 篇 / 289 页 / 1324 块 / 1200 字切分 / bge-m3 + bge-reranker-v2-m3）
+
+- 语料：18 篇开放获取论文（RAG / DPR / FiD / ColBERT / Sentence-BERT / BGE-M3 / HyDE / Self-RAG /
+  RAGAS / GraphRAG / Lost in the Middle / RAG 综述 / MinerU / Seven Failure Points / QLoRA 等），
+  来源与许可逐篇记在 `data/papers/meta/<sha256>.json`；PDF 不提交。
+- 归一化：18/18 成功（含中文论文），2834 块；`--audit` = 1324 块、**缺页 0、跨页 0**、缺章节 20（1.5%）。
+- 页级评测（15 题，仍只覆盖原 3 篇，但检索池是 18 篇）：**paper_hit@8 = 1.000，page_hit@8 = 1.000，
+  page_strict@1 = 0.867（13/15）**。
+  两处 top-1 错误：LoRA 秩 r 题被 QLoRA 同主题块顶到第 1；GPT-3 175B 显存题命中同篇第 5 页而非期望页。
+  扩容前（3 篇 / 198 块）同一题集为 1.000 / 1.000 / 0.933——数字下降是干扰项增多后的真实读数。
+- 切分 A/B（page_hit@8 / page_strict@1，仅在原 3 篇上做过）：600 → 0.933/0.800；800 → 0.933/0.867；
+  **1200 → 1.000/0.933（胜者，已设默认）**；18 篇下未重做切分 A/B。
+- 拒答门控（20 域外 + 20 域内，18 篇池，1200 切分）：**拒答 90%（18/20）、域内误拒 0%（0/20）**。
+  这是**纯阈值口径**（只看向量/精排分，不含生成后接地复核——paper 下该复核默认关闭）。
+  两道漏拒：`BERT 的 MLM 预训练目标`（vec 0.702 / rerank 0.740，召回的 ColBERT 相关工作是"提到 BERT"而非"解释 MLM"）、
+  `Mamba 架构差异`（0.478 / 0.341）。两者与域内最低分（0.486 / 0.290）重叠，**阈值不可分**，只能靠接地判官兜。
+- 负样本重标（2026-10-29）：原「RAG 如何融入生成」「Llama 2 的 MMLU」已被新收录论文真正覆盖，
+  替换为 DoRA / KTO 两题（实测 0.586/0.183、0.000/0.001，均被拒）；改动写在 `eval_data_paper.py` 注释里。
+  因此**旧的「95%」与新的「90%」不是同一题集，不可直接对比**。
+- held-out（10 + 10，只跑一次）：
+  - 3 篇 / 800 切分（历史）：域外拒答 100%，**域内误拒 20%（2/10，检索未命中）**；
+  - **18 篇 / 1200 切分（2026-10-30，本轮）**：域外拒答 **100%（10/10）**，
+    域内误拒 **10%（1/10）**——`中文论文的作者与发表期刊是什么？` 被精排 0.133 < 0.20 拦下。
+  - 两次均**未达 5% 误拒目标**，且按纪律跑完不回调阈值。
+- 三阈值（论文库专用，非课程值）：`PAPER_HARD_REJECT_VECTOR_THRESHOLD=0.40`、
+  `PAPER_HARD_REJECT_RERANK_THRESHOLD=0.20`、`PAPER_LOW_CONFIDENCE_THRESHOLD=0.50`。
+  扩容到 18 篇后仍为 90% / 0%，未重标；上方两道漏拒说明这三个阈值已到顶-1 分数的分辨上限。
+- 解析耗时（GPU，含模型加载）：15 页 70.2s / 26 页 95.7s / 11 页 66.1s；
+  同篇 10 页 CPU 153s vs GPU 78s，峰值显存 5457 MiB。18 篇全量解析约 30 分钟。
+- 切分 A/B（600/800/1200）读数见 `CourseRAG-实现记录.md`（仓库外）。
+
+### 回答质量四指标（P1，2026-10-30）
+
+`eval_paper_quality.py` 两段式：`--stage generate`（qwen2.5:7b 答题）→ `ollama stop` →
+`--stage judge`（glm4:9b 打分，直接复用 `eval_local` 四指标）。15 题页级集，0 题硬拒：
+
+| 指标 | 读数 |
+|---|---|
+| faithfulness | **0.672** |
+| answer_relevancy | **1.000**（15 题全 1.0，本集上无区分度） |
+| context_precision | **0.802** |
+| context_recall | **0.633** |
+| answer_cite_page_acc | **0.800（12/15）** |
+
+- 三处引用页未中：Q3 正文写了「第 7 页」却漏 `[n]`（且 β2 又答成 0.999）；Q6 引到第 20 页（另一篇论文的块）；
+  Q9 引到第 5 页（擦边块只出现 350GB，正确来源在第 8 页）。
+- **四指标宜看趋势**：本地 9B 裁判在长上下文上会假阴性——抽检 Q6/Q14/Q15 答案肉眼正确却判 0。
+  另注意 `JUDGE_LOCAL_REPEAT_PENALTY` 从 1.3 降到 1.1 才让裁判恢复正常判定（见 `config.py` 注释与实现记录）。
+
+### 本地裁判校准（2026-10-30）
+
+`eval_judge.py` 复用生产同一套 `grounding.verify_grounded`（同 prompt、同阈值口径），只换 `JUDGE_MODEL`。
+**手写短答案会高估判官**，所以另加一列「12 条真实生成回答」的复判结果：
+
+| 模型 | 30 对手写集 | 12 条真实回答 | JSON | 单次耗时 |
+|---|---|---|---|---|
+| **glm4:9b** | **96.7%**（FA 1/15、FR 0/15） | **FA 1/6、FR 0/6** | 100% | 1.8s |
+| qwen2.5:7b | 93.3%（FA 1、FR 1） | FA 5/6、FR 3/6 | 100% | 1.8s |
+| qwen3:1.7b | 86.7%（FA 2、FR 2） | — | 93% | 6.0s（有 29s 长尾） |
+| llama3.1:8b | 83.3%（FA 5、FR 0） | — | 100% | 2.9s |
+| gemma3:4b | 63.3%（FA 10、FR 1） | FA 5/6 | 93% | 5.0s |
+| llama3.2:3b | 50.0%（FA 4、FR 11） | — | 70% | 9.7s |
+| qwen3:4b | 不可用 | — | **3%** | 56s |
+
+- 结论：裁判选 **`glm4:9b`**（中文原生、非思考型、与生成模型不同家族）。它是唯一在
+  「手写短答案」和「真实长回答」两种分布上都稳的；`qwen2.5:7b` 在真实回答上放过 5/6 错答。
+- 生成选 **`qwen2.5:7b`**：6 道可答题事实正确率与 `qwen3:4b` 持平（3/6），但平均 15.3s vs 75.0s；
+  `qwen3:4b` 还出现过一次 204 秒后返回空字符串。
+- 8 GB 装不下生成 + 裁判：`OLLAMA_MAX_LOADED_MODELS=1` 串行，换入实测 4.2~5s；
+  精排 + `glm4:9b` + 8192 上下文峰值 **7761 MiB**。
+- **`OLLAMA_NUM_CTX=8192` 必须设**：默认 4096 会把 8 块上下文截断（实测「121 个课题」「28.4 BLEU」因此答错）。
+- **qwen3 系列不能当裁判**：默认思考链吃满输出预算 → 正文为空（4B JSON 成功率 3%）；
+  关思考后推理写进 `content`，18s 仍不吐 JSON。
+- 修复记录：本地裁判补 `num_predict`（此前一次调用生成 40960 token、耗时 545s），
+  Ollama 客户端补 180s 超时，见 `config.JUDGE_LOCAL_MAX_TOKENS`。
+
+### 已知坑
+
+- MinerU 2.7.6 默认走 HuggingFace，本机 hf-mirror 常 429 → 默认 `MINERU_MODEL_SOURCE=modelscope`。
+- `content_list.json` 的 bbox 是 **0–1000 归一化**坐标，`middle.json` 才是 PDF 点；归一化阶段已换算。
+- 中文提问英文论文时向量分偏低（实测 0.53），阈值需按题集标定，别沿用课程值。
+- 换嵌入模型 / 改切分参数 / 改 caption 后必须 `paper_index.py --rebuild`，旧索引不可混用。
+
+### 本地模型 profile（v3 定稿，2026-10-30）
+
+论文库默认：**本地生成 `qwen2.5:7b`** + 本地精排 bge-reranker-v2-m3；
+**生成后接地复核默认关闭**（paper 专属默认 `GROUNDED_VERIFY_ENABLED=false`，课程版仍为 true）。
+关掉的只是"生成后再让裁判复核"这一步，检索前硬拒答阈值（0.40 / 0.20 / 0.50）照常生效。
+`OLLAMA_NUM_CTX=8192` 必须设：默认 4096 会把 8 块上下文截断（实测「121 个课题」「28.4 BLEU」因此答错）。
+
+| 项 | 读数（2026-10-30 实测） | 说明 |
+|---|---|---|
+| 稳态单题（暖） | **8.2 s**（检索+精排 3.2 s + 生成 4.9 s） | 计划 v3 实测；本窗复跑第 2 题 11.6 s |
+| 进程内首题 | 28.9 s 检索 + 2.9 s 生成 | 含 reranker 权重加载约 25 s |
+| 冷启动整轮 | 112.2 s | reranker + 7B 双冷加载，不是稳态 |
+| 峰值显存 | **7737 MiB / 8188** | `ollama ps`：qwen2.5:7b 5.0 GB + bge-m3 664 MB，均 100% GPU |
+| 最坏 prompt | 4098 tokens | 8192 下同题峰值 7744 MiB、`done_reason=stop`，未截断 |
+
+- 显存余量约 450 MiB：**7B 生成与 9B 裁判不能同驻**。要开接地复核：
+  `GROUNDED_VERIFY_ENABLED=true` + `JUDGE_PROVIDER=local` / `JUDGE_MODEL=glm4:9b`，与生成串行换模型。
+- 本地裁判候选（30 对校准）：glm4:9b **0.97**（误放行 1）> qwen2.5:7b 0.92 > qwen2.5:3b 0.87；
+  qwen3 系列 JSON 失败率高，不能当裁判。
+- **关闸代价（实测）**：同一题问 β1/β2，7B 在部分跑次把 `beta2` 答成 `0.999`（原文 0.98；也有跑次答对）；
+  开门时裁判给 0.33 并替换成拒答，关门后错答会直接返回。裁判同文判定不稳定（跨轮精度约 50%），
+  所以只做可选开关、不做默认硬门控。需要"宁可拒答也别答错"的场景，请显式 `GROUNDED_VERIFY_ENABLED=true`。
+- 云端裁判 key 401 时改用 `JUDGE_PROVIDER=local`；paper 下 `GROUNDED_VERIFY_ENABLED=false` 是默认，不是排障开关。
 
 ## 这是什么问题
 
@@ -209,7 +386,7 @@ streamlit run app.py
 |---|---|---|
 | `HARD_REJECT_VECTOR_THRESHOLD` | `0.58` | 向量分低于此值判为语料外 → 硬拒答（bge-m3 重标定） |
 | `HARD_REJECT_RERANK_THRESHOLD` | `0.30` | 精排分低于此值判为语料外 → 硬拒答 |
-| `GROUNDED_VERIFY_ENABLED` | `true` | 接地自检开关 |
+| `GROUNDED_VERIFY_ENABLED` | course `true` / paper `false` | 生成后接地复核开关（paper 默认关，见「本地模型 profile」；检索前硬拒答不受影响） |
 | `GROUNDED_SCORE_THRESHOLD` | `0.60` | 接地自检阈值，未达标记 `low_confidence` |
 | `LOW_CONFIDENCE_THRESHOLD` | `0.62` | fast 模式低置信标记阈值（bge-m3 重标定） |
 
@@ -241,6 +418,9 @@ streamlit run app.py
 交互式文档：启动后访问 `http://localhost:8000/docs`。
 
 ### 端点一览
+
+> 论文库 profile 的 `/papers`、`/papers/{id}/blocks`、`/papers/{id}/pages/{page}.png` 见上文
+> 「接口（FastAPI）」；其余端点两种 profile 通用。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -521,6 +701,9 @@ flowchart TB
 > `IMAGE_EMBED_CAPTIONS_CSV` / `IMAGE_CAPTIONS_CSV` 分离。
 
 ## 评估
+
+> 默认 profile 为 **paper**：论文库读数见上文「论文库实测」（页级 15 题 / 拒答门控 / held-out）。
+> 本节及以下 v1.1 数字属于 **课程版（`APP_PROFILE=course`，已归档）**，不要当论文版证据。
 
 评估链路自实现，不碰 HuggingFace：裁判默认走云端 OpenAI 兼容接口（`JUDGE_PROVIDER=openai`，kimi-k2.6，temperature=0 逼稳定 JSON），可切回本机 Ollama（`JUDGE_PROVIDER=local`）；embedding 走本机 bge-m3。
 

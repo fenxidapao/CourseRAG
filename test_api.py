@@ -29,6 +29,9 @@ os.environ["QUERY_LOG_PATH"] = _tmp.name
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# 本文件锁定课程版语义（默认 profile 已切 paper）；必须在 import config 之前设置
+os.environ["APP_PROFILE"] = "course"
+
 import config
 import main
 from fastapi.testclient import TestClient
@@ -40,7 +43,7 @@ class FakeCol:
     def __init__(self, count=10, metas=None):
         self._count = count
         self._metas = metas or [{"source": "/x/a.md"} for _ in range(count)]
-        self.name = "course_rag"
+        self.name = config.COLLECTION_NAME
 
     def count(self):
         return self._count
@@ -602,7 +605,7 @@ def test_index_stats(client, monkeypatch):
     body = r.json()
     assert body["count"] == 7
     assert body["source_files"] == 2  # 按 source 去重
-    assert body["collection"] == "course_rag"
+    assert body["collection"] == config.COLLECTION_NAME
 
 
 def test_index_stats_unavailable(client, monkeypatch):

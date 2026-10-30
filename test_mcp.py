@@ -26,6 +26,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# 本文件锁定课程版语义（默认 profile 已切 paper）；必须在 import config 之前设置
+os.environ["APP_PROFILE"] = "course"
+
 import config
 import mcp_server
 from mcp_server import (
@@ -46,7 +49,29 @@ def anyio_backend():
 
 
 def _server_params() -> StdioServerParameters:
-    return StdioServerParameters(command=sys.executable, args=[MCP_SERVER])
+    # MCP SDK 默认只透传少量环境变量；显式带上 APP_PROFILE，避免子进程落回默认 paper
+    return StdioServerParameters(
+        command=sys.executable,
+        args=[MCP_SERVER],
+        env={**os.environ, "APP_PROFILE": "course"},
+    )
+
+
+def _server_params_paper() -> StdioServerParameters:
+    return StdioServerParameters(
+        command=sys.executable,
+        args=[MCP_SERVER],
+        env={**os.environ, "APP_PROFILE": "paper"},
+    )
+
+
+def _paper_index_ready():
+    from pathlib import Path
+
+    if not _ollama_ready():
+        return False
+    norm = Path(config.PAPERS_DIR) / "normalized"
+    return norm.is_dir() and any(norm.glob("*.json")) and Path("chroma_db_papers").exists()
 
 
 # ==================== 协议组（官方 client SDK 子进程直测，无需 Ollama） ====================
@@ -60,14 +85,24 @@ async def test_handshake_and_tools_list_schema():
 
             result = await session.list_tools()
             tools = {t.name: t for t in result.tools}
-            # 双工具：把「两个工具」本身作为断言，防止日后被改回单工具而无人察觉
-            assert set(tools) == {"course_retrieve", "list_documents"}, tools
+            # 工具集合本身作为断言：paper_retrieve 为论文库主入口，course_retrieve 保留为
+            # 课程版兼容别名（不删），list_documents 通用于两种 profile
+            assert set(tools) == {
+                "paper_retrieve",
+                "course_retrieve",
+                "list_documents",
+            }, tools
 
             schema = tools["course_retrieve"].input_schema
             assert "query" in schema["required"]
             assert "query" in schema["properties"]
             assert schema["properties"]["mode"]["enum"] == ["fast", "accurate"]
             assert schema["properties"]["top_k"]["default"] == 5
+
+            ps = tools["paper_retrieve"].input_schema
+            assert "query" in ps["required"]
+            assert ps["properties"]["mode"]["enum"] == ["fast", "accurate"]
+            assert ps["properties"]["top_k"]["default"] == 5
 
             ld = tools["list_documents"].input_schema
             assert ld.get("required", []) == []  # 无必填参数：模型可直接调用探查知识边界
@@ -252,3 +287,19 @@ async def test_tools_call_real_list_documents_end_to_end():
             )
             assert miss.is_error is False
             assert "没有文件名匹配" in miss.content[0].text
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(not _paper_index_ready(), reason="论文索引未就绪（需 data/papers/normalized + chroma_db_papers + Ollama）")
+async def test_paper_retrieve_end_to_end():
+    """paper profile 下 paper_retrieve 必须给出《论文名》第 N 页（M6 三出口一致性）。"""
+    async with stdio_client(_server_params_paper()) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            res = await session.call_tool(
+                "paper_retrieve",
+                {"query": "multi-head attention", "top_k": 2, "mode": "fast"},
+            )
+            assert res.is_error is False
+            text = res.content[0].text
+            assert "来源" in text and "第" in text and "页" in text, text
