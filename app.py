@@ -101,6 +101,71 @@ def render_answer_html(answer, n_sources, mid):
     return _BRACKET_RE.sub(repl, answer)
 
 
+def _paper_pdf_path(cit):
+    name = cit.get("source", "")
+    p = Path(config.PAPERS_RAW_DIR) / name
+    if p.exists():
+        return p
+    for q in Path(config.PAPERS_DIR).rglob(name):
+        return q
+    return None
+
+
+def render_citation(cit, mid=None):
+    """引用卡：课程版显示 offset；论文版显示《标题》第 N 页 + 章节 + 页图高亮。"""
+    score_txt = f" · 相关性 **{cit['score']:.3f}**" if cit.get("score") is not None else ""
+    if mid is not None:
+        st.markdown(
+            f'<div id="m{mid}-src-{cit["rank"]}"></div>', unsafe_allow_html=True
+        )
+    if cit.get("paper_id"):
+        header = (
+            f"**#{cit['rank']} 《{cit.get('title') or cit.get('source')}》"
+            f"第 {cit.get('page')} 页**{score_txt}"
+        )
+        if cit.get("section"):
+            header += f" · {cit['section']}"
+        if cit.get("block_type"):
+            header += f"  `{cit['block_type']}`"
+        st.markdown(header, unsafe_allow_html=True)
+        pdf = _paper_pdf_path(cit)
+        if pdf and cit.get("page"):
+            try:
+                import page_render
+
+                boxes = page_render.bboxes_for_blocks(
+                    cit["paper_id"], cit.get("block_ids"), page=int(cit["page"])
+                )
+                png = page_render.render_page_png(
+                    pdf, int(cit["page"]), blocks=[{"bbox": b} for b in boxes]
+                )
+                st.image(
+                    png,
+                    caption=f"《{cit.get('title') or cit.get('source')}》第 {cit['page']} 页 · 引用块高亮",
+                    width=560,
+                )
+            except Exception as e:
+                st.warning(f"页图渲染失败: {e}")
+        else:
+            st.caption("页图不可用：找不到论文 PDF")
+    else:
+        st.markdown(
+            f"**#{cit['rank']} {cit['source']}**{score_txt}  `offset={cit.get('start_index')}`",
+            unsafe_allow_html=True,
+        )
+        # P2 多模态：图像块渲染原图——caption 只是检索代理文本，原图才是最终证据
+        if cit.get("type") == "image" and cit.get("image_path"):
+            _img = Path(__file__).parent / cit["image_path"]
+            if _img.exists():
+                st.image(str(_img), caption=f"📎 教材插图 · 第 {cit.get('page')} 页", width=420)
+            else:
+                st.warning(f"图像文件缺失: {cit['image_path']}")
+    st.markdown(
+        f"```text\n{cit['content'][:500]}{'...' if len(cit['content']) > 500 else ''}\n```",
+        unsafe_allow_html=True,
+    )
+
+
 def _persist_feedback(msg, fb):
     """写反馈：回写 .query_log.jsonl（按 log_ts 定位）+ 存历史（刷新不丢）。"""
     log_ts = msg.get("log_ts")
@@ -130,9 +195,72 @@ def render_feedback_buttons(mid):
         st.rerun()
 
 
+def _course_upload_panel():
+    st.subheader("上传课程资料")
+    uploaded_files = st.file_uploader("PDF / PPTX / TXT / MD / DOCX", type=["pdf", "pptx", "txt", "md", "docx"], accept_multiple_files=True)
+    if uploaded_files:
+        data_dir = Path(config.DATA_DIR)
+        data_dir.mkdir(exist_ok=True)
+        saved_paths = []
+        for file in uploaded_files:
+            dest = data_dir / file.name
+            with open(dest, "wb") as f:
+                f.write(file.getbuffer())
+            saved_paths.append(dest)
+            st.success(f"已保存: {file.name}")
+        if st.button("⤴️ 增量索引上传文件", type="primary"):
+            if get_vector_store(auto_rebuild=False).count() == 0:
+                with st.spinner("首次建库：从 data/ 全量重建索引..."):
+                    chunks = load_and_chunk_documents()
+                    get_vector_store(chunks)
+                    semantic_cache.invalidate()
+                st.success("首次建库完成！")
+            else:
+                with st.spinner("正在增量索引（仅新上传文件）..."):
+                    total = 0
+                    for p in saved_paths:
+                        total += add_documents(chunk_file(p))
+                    st.success(f"增量索引完成！新增/覆盖 {total} 块")
+            st.rerun()
+
+
+def _paper_upload_panel():
+    st.subheader("上传论文 PDF")
+    st.caption("MinerU 子进程解析 → normalized → 页内切分 → paper_rag 索引。")
+    files = st.file_uploader(
+        "PDF", type=["pdf"], accept_multiple_files=True, key="paper_uploader"
+    )
+    if files:
+        raw = Path(config.PAPERS_RAW_DIR)
+        raw.mkdir(parents=True, exist_ok=True)
+        for file in files:
+            dest = raw / file.name
+            with open(dest, "wb") as f:
+                f.write(file.getbuffer())
+            st.success(f"已保存: {file.name}")
+        if st.button("⤴️ 解析并索引上传论文", type="primary", key="paper_ingest_btn"):
+            import paper_index
+            import paper_ingest
+
+            with st.spinner("MinerU 解析中（首次会下载模型，可能较慢）..."):
+                try:
+                    res = paper_ingest.ingest_dir(
+                        raw_dir=raw, only_new=True, retry_failed=True
+                    )
+                    for pid, status in res.items():
+                        if status in ("normalized", "skip"):
+                            n = paper_index.upsert_paper(pid)
+                            st.success(f"{pid} 已索引 {n} 块")
+                        else:
+                            st.info(f"{pid}: {status}")
+                except Exception as e:
+                    st.error(f"解析/索引失败: {e}")
+            st.rerun()
+
+
 # ==================== 页面配置 ====================
 st.set_page_config(
-    page_title="CourseRAG - 专业课问答助手",
+    page_title="CourseRAG - 论文库问答助手" if config.APP_PROFILE == "paper" else "CourseRAG - 专业课问答助手",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -154,6 +282,8 @@ if "mode" not in st.session_state:
 # ==================== 侧边栏 ====================
 with st.sidebar:
     st.header("📚 CourseRAG 控制台")
+    _profile, _collection, _persist = config.profile_summary()
+    st.caption(f"profile={_profile} · collection={_collection} · persist={_persist}")
 
     # ---- P0-1 启动自检状态条 ----
     st.subheader("🔧 环境状态")
@@ -191,7 +321,7 @@ with st.sidebar:
                     "设 RERANKER_ENABLED=true 可叠加 bge-reranker 精排。")
 
     # ---- P1a（2026-09-04）教材过滤：限定检索范围 / 关键词自动路由 ----
-    st.subheader("📚 教材过滤")
+    st.subheader("📚 论文过滤" if config.APP_PROFILE == "paper" else "📚 教材过滤")
     try:
         _src_names = sorted(Path(s).name for s in get_available_sources())
     except Exception:
@@ -210,71 +340,81 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ---- 上传课程资料 ----
-    st.subheader("上传课程资料")
-    uploaded_files = st.file_uploader("PDF / PPTX / TXT / MD / DOCX", type=["pdf", "pptx", "txt", "md", "docx"], accept_multiple_files=True)
-    if uploaded_files:
-        data_dir = Path(config.DATA_DIR)
-        data_dir.mkdir(exist_ok=True)
-        saved_paths = []
-        for file in uploaded_files:
-            dest = data_dir / file.name
-            with open(dest, "wb") as f:
-                f.write(file.getbuffer())
-            saved_paths.append(dest)
-            st.success(f"已保存: {file.name}")
-        if st.button("⤴️ 增量索引上传文件", type="primary"):
-            # P1-4：基础库为空（首次/清空后）时退化为全量重建，避免 data/ 已有文件被静默漏索引；
-            # 基础库已存在则只增量 upsert 刚上传的文件（稳定 id 自动去重，不重建全库）。
-            # 评审 P2-3：显式判空走首建分支（auto_rebuild=False 避免内部隐式重建的双重劳动）。
-            if get_vector_store(auto_rebuild=False).count() == 0:
-                with st.spinner("首次建库：从 data/ 全量重建索引..."):
+    # ---- 上传（按 profile 分派）----
+    if config.APP_PROFILE == "paper":
+        _paper_upload_panel()
+    else:
+        _course_upload_panel()
+
+    st.markdown("---")
+    if config.APP_PROFILE == "paper":
+        st.subheader("论文索引管理")
+        st.caption("从 data/papers/normalized/ 全量重建论文索引。")
+        if st.button("🔄 全量重建论文索引", type="primary", key="reindex_paper_btn"):
+            import paper_index
+
+            with st.spinner("正在重建论文索引..."):
+                try:
+                    n = paper_index.rebuild_all()
+                    st.success(f"索引完成！共 {n} 块")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"索引失败: {e}")
+    else:
+        st.subheader("索引管理")
+        st.caption("基础库已建好时，上方上传=增量追加；此按钮用于从 data/ 全量重建（忽略已上传但未索引的文件差异）。")
+        if st.button("🔄 全量重建索引（data/ 全部）", type="primary", key="reindex_btn"):
+            with st.spinner("正在从 data/ 重建索引..."):
+                try:
                     chunks = load_and_chunk_documents()
                     get_vector_store(chunks)
                     semantic_cache.invalidate()  # P2：重建后旧缓存作废
-                st.success("首次建库完成！")
-            else:
-                with st.spinner("正在增量索引（仅新上传文件）..."):
-                    total = 0
-                    for p in saved_paths:
-                        total += add_documents(chunk_file(p))
-                    st.success(f"增量索引完成！新增/覆盖 {total} 块")
-            st.rerun()
-
-    st.markdown("---")
-    st.subheader("索引管理")
-    st.caption("基础库已建好时，上方上传=增量追加；此按钮用于从 data/ 全量重建（忽略已上传但未索引的文件差异）。")
-    if st.button("🔄 全量重建索引（data/ 全部）", type="primary", key="reindex_btn"):
-        with st.spinner("正在从 data/ 重建索引..."):
-            try:
-                chunks = load_and_chunk_documents()
-                get_vector_store(chunks)
-                semantic_cache.invalidate()  # P2：重建后旧缓存作废
-                st.success(f"索引完成！共 {len(chunks)} 块")
-                st.rerun()
-            except Exception as e:
-                st.error(f"索引失败: {e}")
-
-    st.markdown("---")
-    st.subheader("当前文档")
-    data_dir = Path(config.DATA_DIR)
-    current_files = [f.name for f in data_dir.glob("*.*")] if data_dir.exists() else []
-    if current_files:
-        for fname in current_files:
-            col1, col2 = st.columns([4, 1])
-            col1.markdown(f"📄 {fname}")
-            if col2.button("🗑", key=f"del_{fname}", help="从索引中删除该文档（其余不受影响）"):
-                try:
-                    (data_dir / fname).unlink()
-                    with st.spinner("正在从索引移除该文档..."):
-                        # P1-4：只删该 source 的块，其余文档检索不受影响（不再全量重建）
-                        delete_by_source(str(data_dir / fname))
-                    st.success(f"已删除并移出索引：{fname}")
+                    st.success(f"索引完成！共 {len(chunks)} 块")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"错误: {e}")
+                    st.error(f"索引失败: {e}")
+
+    st.markdown("---")
+    st.subheader("当前论文" if config.APP_PROFILE == "paper" else "当前文档")
+    if config.APP_PROFILE == "paper":
+        import paper_ingest
+
+        states = paper_ingest.list_states()
+        if not states:
+            st.info("还没有论文，先上传 PDF 或把文件放进 data/papers/raw/。")
+        for s in states:
+            col1, col2 = st.columns([4, 1])
+            col1.markdown(
+                f"📄 {s.get('filename', '')} · {s.get('status', '')} · {s.get('chunks', 0)} 块"
+            )
+            if col2.button("🗑", key=f"delp_{s.get('paper_id')}", help="从索引和状态中删除该论文"):
+                import paper_index
+
+                paper_index.delete_paper(s["paper_id"])
+                (Path(config.PAPERS_DIR) / "_state" / f"{s['paper_id']}.json").unlink(
+                    missing_ok=True
+                )
+                paper_ingest.write_manifest()
+                st.rerun()
     else:
-        st.info("还没有文档，先上传或把资料放进 data/ 目录。")
+        data_dir = Path(config.DATA_DIR)
+        current_files = [f.name for f in data_dir.glob("*.*")] if data_dir.exists() else []
+        if current_files:
+            for fname in current_files:
+                col1, col2 = st.columns([4, 1])
+                col1.markdown(f"📄 {fname}")
+                if col2.button("🗑", key=f"del_{fname}", help="从索引中删除该文档（其余不受影响）"):
+                    try:
+                        (data_dir / fname).unlink()
+                        with st.spinner("正在从索引移除该文档..."):
+                            # P1-4：只删该 source 的块，其余文档检索不受影响（不再全量重建）
+                            delete_by_source(str(data_dir / fname))
+                        st.success(f"已删除并移出索引：{fname}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"错误: {e}")
+        else:
+            st.info("还没有文档，先上传或把资料放进 data/ 目录。")
 
     st.markdown("---")
     st.subheader("系统提示词")
@@ -308,7 +448,10 @@ with st.sidebar:
 
 # ==================== 主区域 ====================
 st.title("📚 CourseRAG")
-st.markdown("基于本地 Ollama 的**专业课 / 课本问答**助手（数据不出本机）")
+if config.APP_PROFILE == "paper":
+    st.markdown("基于本地 Ollama 的**论文库问答**助手（引用精确到《论文名》第 N 页，数据不出本机）")
+else:
+    st.markdown("基于本地 Ollama 的**专业课 / 课本问答**助手（数据不出本机）")
 if st.session_state.mode == "accurate":
     rerank_part = " + bge-reranker 精排" if config.RERANKER_ENABLED else ""
     st.caption("检索策略：向量召回 top-%d + BM25 融合%s top-%d（精确模式）" % (
@@ -332,32 +475,13 @@ for idx, message in enumerate(st.session_state.messages):
         if "citations" in message and message["citations"]:
             with st.expander("📌 来源（检索 + 重排结果）", expanded=False):
                 for cit in message["citations"]:
-                    score_txt = f" · 相关性 **{cit['score']:.3f}**" if cit.get("score") is not None else ""
-                    # 锚点：与回答里的 [n] 对应，点击可跳转定位
-                    st.markdown(
-                        f'<div id="m{idx}-src-{cit["rank"]}"></div>',
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"**#{cit['rank']} {cit['source']}**{score_txt}  `offset={cit.get('start_index')}`",
-                        unsafe_allow_html=True,
-                    )
-                    # P2 多模态：图像块渲染原图——caption 只是检索代理文本，原图才是最终证据
-                    if cit.get("type") == "image" and cit.get("image_path"):
-                        _img = Path(__file__).parent / cit["image_path"]
-                        if _img.exists():
-                            st.image(str(_img), caption=f"📎 教材插图 · 第 {cit.get('page')} 页", width=420)
-                        else:
-                            st.warning(f"图像文件缺失: {cit['image_path']}")
-                    st.markdown(
-                        f"```text\n{cit['content'][:500]}{'...' if len(cit['content']) > 500 else ''}\n```",
-                        unsafe_allow_html=True,
-                    )
+                    render_citation(cit, mid=idx)
             # 最后一条助手消息：渲染 👍/👎 反馈按钮（含刷新/重载后状态恢复）
             if role == "assistant" and idx == len(st.session_state.messages) - 1:
                 render_feedback_buttons(idx)
 
-if prompt := st.chat_input("问任何专业课问题..."):
+_placeholder = "问论文库里的任何问题..." if config.APP_PROFILE == "paper" else "问任何专业课问题..."
+if prompt := st.chat_input(_placeholder):
     # 先用「已有历史」拼上下文（不含本次提问），再追加用户消息
     history_text = build_history_text(st.session_state.messages)
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -446,10 +570,16 @@ if prompt := st.chat_input("问任何专业课问题..."):
             # 快速模式或精确模式漏拒 → 软提示「资料可能不足」（保留旧 T3 行为）。
             _conf = None if docs is None else get_confidence(docs)
             if accurate and (res["rejected"] or res["not_grounded"]):
-                st.error(
-                    "🚫 **已拒答**：根据提供的课程资料无法回答该问题"
-                    "（检索不相关 / 回答未接地）。建议补充相关教材或笔记后重试。"
-                )
+                if config.APP_PROFILE == "paper":
+                    st.error(
+                        "🚫 **已拒答**：根据提供的论文库无法回答该问题"
+                        "（检索不相关 / 回答未接地）。建议补充相关论文后重试。"
+                    )
+                else:
+                    st.error(
+                        "🚫 **已拒答**：根据提供的课程资料无法回答该问题"
+                        "（检索不相关 / 回答未接地）。建议补充相关教材或笔记后重试。"
+                    )
             elif _conf is not None and _conf < config.LOW_CONFIDENCE_THRESHOLD:
                 st.warning(
                     f"⚠️ **资料可能不足**（相关度 {_conf:.2f} < 阈值 {config.LOW_CONFIDENCE_THRESHOLD}）。"
@@ -480,27 +610,7 @@ if prompt := st.chat_input("问任何专业课问题..."):
             # 展示引用
             with st.expander("📌 来源（检索 + 重排结果）", expanded=False):
                 for cit in citations:
-                    score_txt = f" · 相关性 **{cit['score']:.3f}**" if cit.get("score") is not None else ""
-                    # 锚点：与回答里的 [n] 对应，点击可跳转定位
-                    st.markdown(
-                        f'<div id="m{mid}-src-{cit["rank"]}"></div>',
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(
-                        f"**#{cit['rank']} {cit['source']}**{score_txt}  `offset={cit.get('start_index')}`",
-                        unsafe_allow_html=True,
-                    )
-                    # P2 多模态：同历史重放路径，图像块渲染原图
-                    if cit.get("type") == "image" and cit.get("image_path"):
-                        _img = Path(__file__).parent / cit["image_path"]
-                        if _img.exists():
-                            st.image(str(_img), caption=f"📎 教材插图 · 第 {cit.get('page')} 页", width=420)
-                        else:
-                            st.warning(f"图像文件缺失: {cit['image_path']}")
-                    st.markdown(
-                        f"```text\n{cit['content'][:500]}{'...' if len(cit['content']) > 500 else ''}\n```",
-                        unsafe_allow_html=True,
-                    )
+                    render_citation(cit, mid=mid)
 
             # 反馈按钮（仅本次生成的这条）
             render_feedback_buttons(len(st.session_state.messages) - 1)

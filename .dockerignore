@@ -14,7 +14,11 @@ chroma_db*/
 .chat_history.json
 .query_log.jsonl
 
-# 本地虚拟环境 / 诊断 / 评估产物
+# 本地虚拟环境 / 前端依赖 / 诊断 / 评估产物
 venv/
 rag_env/
+venv-mineru/
+frontend/node_modules/
+frontend/dist/
+.pytest_cache/
 *.csv

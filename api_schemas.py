@@ -21,9 +21,16 @@ class Citation(BaseModel):
     content: str = Field(..., description="命中的原文块（图像块为 caption 描述文本）")
     score: Optional[float] = Field(None, description="相关性分数：reranker 开启为 rerank_score，否则为 hybrid_score 或 None")
     start_index: Optional[int] = Field(None, description="该块在原文中的字符偏移，供溯源定位；图像块为负值")
-    type: Optional[str] = Field(None, description="块类型：图像块为 'image'；文本块无此字段")
+    type: Optional[str] = Field(None, description="块类型：课程图像块为 'image'；论文块为 text/table/figure/formula")
     image_path: Optional[str] = Field(None, description="图像块对应 PNG 的相对路径（仅图像块有）")
-    page: Optional[int] = Field(None, description="图像块在教材 PDF 中的页码（仅图像块有）")
+    page: Optional[int] = Field(None, description="论文块/教材图像块的物理页码（1 起）")
+    paper_id: Optional[str] = Field(None, description="论文库 paper_id（仅论文块有）")
+    title: Optional[str] = Field(None, description="论文标题（仅论文块有）")
+    page_start: Optional[int] = Field(None, description="论文块起始物理页（论文块恒等于 page）")
+    page_end: Optional[int] = Field(None, description="论文块结束物理页（论文块恒等于 page）")
+    section: Optional[str] = Field(None, description="论文块所属章节路径，如 '3 Method > 3.2 Loss'")
+    block_type: Optional[str] = Field(None, description="论文块归一化类型 text/table/figure/formula")
+    block_ids: Optional[str] = Field(None, description="论文块对应的归一化 block_id 逗号串，供页图高亮")
 
 
 class CheckItem(BaseModel):
@@ -131,6 +138,52 @@ class IndexStats(BaseModel):
     count: int = Field(..., description="向量库总块数")
     source_files: int = Field(..., description="已索引的源文档数（按 source 去重）")
     persist_directory: str = Field(..., description="向量库持久化目录")
+
+
+# ==================== 论文库（v2.1） ====================
+class PaperInfo(BaseModel):
+    paper_id: str
+    filename: str = ""
+    title: str = ""
+    status: str = ""
+    pages: int = 0
+    blocks: int = 0
+    chunks: int = 0
+    parse_sec: float = 0
+    pages_per_sec: float = 0
+    error: str = ""
+    updated_at: str = ""
+
+
+class PaperList(BaseModel):
+    papers: list[PaperInfo]
+
+
+class PaperUploadItem(BaseModel):
+    paper_id: str
+    filename: str
+    status: str
+
+
+class PaperUploadResponse(BaseModel):
+    files: list[PaperUploadItem]
+
+
+class PaperActionResponse(BaseModel):
+    paper_id: str
+    status: str
+
+
+class PaperBlocksResponse(BaseModel):
+    paper_id: str
+    n_pages: int
+    pages: list[dict]
+
+
+class PaperDeleteResponse(BaseModel):
+    deleted: bool
+    paper_id: str
+    raw_deleted: bool = False
 
 
 # ==================== 健康检查 ====================

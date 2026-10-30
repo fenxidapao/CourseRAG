@@ -9,16 +9,19 @@
 FROM python:3.11-slim AS deps
 
 ARG WITH_RERANKER=false
+# 国内网络可覆盖为镜像源，例如：
+#   docker build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple .
+ARG PIP_INDEX_URL=https://pypi.org/simple
 ENV WITH_RERANKER=$WITH_RERANKER
 
 WORKDIR /app
 # 先只拷依赖清单，充分利用 Docker 层缓存（改代码不用重装依赖）
 COPY requirements-api.txt ./
 COPY requirements-rerank.txt ./
-RUN pip install --no-cache-dir -r requirements-api.txt \
+RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r requirements-api.txt \
     && if [ "$WITH_RERANKER" = "true" ]; then \
          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
-         && pip install --no-cache-dir -r requirements-rerank.txt; \
+         && pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r requirements-rerank.txt; \
        fi
 
 # ===== Stage 2: 运行镜像 =====

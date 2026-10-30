@@ -38,7 +38,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 import config
 from api_security import RateLimitMiddleware, require_auth
@@ -51,6 +51,13 @@ from api_schemas import (
     HealthResponse,
     IndexStats,
     IngestResponse,
+    PaperActionResponse,
+    PaperBlocksResponse,
+    PaperDeleteResponse,
+    PaperInfo,
+    PaperList,
+    PaperUploadItem,
+    PaperUploadResponse,
     QueryRequest,
     QueryResponse,
     RebuildResponse,
@@ -93,6 +100,27 @@ def _safe_filename(name: str) -> str:
     return name
 
 
+async def _read_upload(file: UploadFile):
+    """有界读取上传体；超过 MAX_UPLOAD_MB 立即 413。"""
+    max_bytes = config.MAX_UPLOAD_MB * 1024 * 1024
+    buf = bytearray()
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"文件过大（>{config.MAX_UPLOAD_MB}MB）。"
+                "如需接入大体积扫描版 PDF，请用本地脚本 ingest_ocr.py，不经上传接口。",
+            )
+    content = bytes(buf)
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    return content
+
+
 def _load_index_or_raise():
     """确保向量库可用；Ollama 未启动 / 库损坏时给出可操作的报错。
     评审 P2-3：/index/stats 是只读端点，空库不触发自动重建。"""
@@ -108,6 +136,8 @@ def _load_index_or_raise():
 # ==================== 应用生命周期 ====================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    profile, collection, persist = config.profile_summary()
+    print(f"[profile] APP_PROFILE={profile} collection={collection} persist={persist}")
     # 启动预热：懒加载向量库（库为空且有资料会自动重建）。失败不阻塞启动——
     # Ollama 没启动时健康检查会明确报出来，而不是让服务起不来。
     try:
@@ -420,6 +450,23 @@ def list_documents():
     1. 块数按文件名匹配而非全路径——否则 Windows 建索引 + Linux 容器读取时全失配；
     2. 递归 rglob 取代 iterdir——原实现只扫一级，data/教材/ 下的 PDF/PPTX 全部漏列。
     """
+    if config.APP_PROFILE == "paper":
+        import paper_ingest
+
+        files, total = [], 0
+        for s in paper_ingest.list_states():
+            p = Path(s.get("source_path", ""))
+            n = int(s.get("chunks", 0) or 0)
+            files.append(
+                DocInfo(
+                    name=s.get("filename", ""),
+                    size_bytes=p.stat().st_size if p.exists() else 0,
+                    chunks=n,
+                )
+            )
+            total += n
+        return DocumentsResponse(files=files, total_chunks=total)
+
     data_dir = Path(config.DATA_DIR)
     data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -451,6 +498,14 @@ async def upload_document(file: UploadFile = File(..., description="PDF / TXT / 
     首次建库（向量库为空）时自动退化为从 data/ 全量重建，避免已有资料被漏索引——
     与 app.py 侧边栏的首次建库行为保持一致。
     """
+    if config.APP_PROFILE == "paper":
+        item = await _save_paper_upload(file)
+        return IngestResponse(
+            file=item.filename,
+            saved_to=str(Path(config.PAPERS_RAW_DIR) / item.filename),
+            added_chunks=0,
+        )
+
     name = _safe_filename(file.filename or "")
     suffix = Path(name).suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
@@ -463,24 +518,7 @@ async def upload_document(file: UploadFile = File(..., description="PDF / TXT / 
     data_dir.mkdir(parents=True, exist_ok=True)
     dest = data_dir / name
 
-    # 有界读取（评审 P3）：按 1MB 分块累计，超过 MAX_UPLOAD_MB 立即 413——
-    # 不先把整个请求体读进内存再判长度，避免超大上传打爆内存
-    max_bytes = config.MAX_UPLOAD_MB * 1024 * 1024
-    buf = bytearray()
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        buf.extend(chunk)
-        if len(buf) > max_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"文件过大（>{config.MAX_UPLOAD_MB}MB）。"
-                "如需接入大体积扫描版 PDF，请用本地脚本 ingest_ocr.py，不经上传接口。",
-            )
-    content = bytes(buf)
-    if not content.strip():
-        raise HTTPException(status_code=400, detail="文件内容为空")
+    content = await _read_upload(file)
     dest.write_bytes(content)
 
     try:
@@ -510,6 +548,20 @@ def delete_document(name: str):
     索引照常移除，响应带 warning 提示，保证『文档内容已不可检索』是确定性的。
     """
     safe = _safe_filename(name)
+    if config.APP_PROFILE == "paper":
+        import paper_index
+        import paper_ingest
+
+        for s in paper_ingest.list_states():
+            if s.get("filename") == safe:
+                pid = s.get("paper_id", "")
+                paper_index.delete_paper(pid)
+                sp = Path(config.PAPERS_DIR) / "_state" / f"{pid}.json"
+                sp.unlink(missing_ok=True)
+                paper_ingest.write_manifest()
+                return DeleteResponse(deleted=True, filename=safe, warning=None)
+        raise HTTPException(status_code=404, detail=f"论文不存在: {safe}")
+
     data_dir = Path(config.DATA_DIR)
     path = data_dir / safe
 
@@ -526,6 +578,225 @@ def delete_document(name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"移除索引失败：{e}")
     return DeleteResponse(deleted=True, filename=safe, warning=warning)
+
+
+# ==================== 论文库（v2.1） ====================
+def require_paper_profile():
+    """论文端点只在 paper profile 下可用：course profile 调用会写进课程集合，属跨库污染。"""
+    if config.APP_PROFILE != "paper":
+        raise HTTPException(
+            status_code=400,
+            detail="论文接口仅在 APP_PROFILE=paper 时可用（当前为 course）",
+        )
+
+
+_PAPER_QUEUE = queue.Queue()
+_PAPER_WORKERS = []
+_PAPER_WORKERS_LOCK = threading.Lock()
+
+
+def _paper_worker():
+    import paper_index
+    import paper_ingest
+
+    while True:
+        task = _PAPER_QUEUE.get()
+        if task is None:
+            return
+        pdf, force = task
+        try:
+            status = paper_ingest.ingest_one(Path(pdf), force=force)
+            if status in ("normalized", "skip"):
+                pid = paper_ingest.paper_id(paper_ingest.sha256_file(Path(pdf)))
+                state = paper_ingest.load_state(pid) or {}
+                if state.get("status") != "indexed":
+                    paper_index.upsert_paper(pid)
+            print(f"[papers] {Path(pdf).name}: {status}")
+        except Exception as e:
+            print(f"[papers] worker failed: {e!r}")
+        finally:
+            _PAPER_QUEUE.task_done()
+
+
+def _ensure_paper_workers():
+    with _PAPER_WORKERS_LOCK:
+        while len(_PAPER_WORKERS) < config.PARSE_CONCURRENCY:
+            t = threading.Thread(target=_paper_worker, daemon=True)
+            t.start()
+            _PAPER_WORKERS.append(t)
+
+
+def _paper_state_or_404(paper_id: str):
+    import paper_ingest
+
+    if not paper_id.isalnum():
+        raise HTTPException(status_code=404, detail=f"非法 paper_id: {paper_id}")
+    state = paper_ingest.load_state(paper_id)
+    if not state:
+        raise HTTPException(status_code=404, detail=f"论文不存在: {paper_id}")
+    return state
+
+
+def _paper_pdf(state):
+    path = Path(state.get("source_path", ""))
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="论文 PDF 不存在")
+    return path
+
+
+def _paper_info(state):
+    return PaperInfo(
+        paper_id=state.get("paper_id", ""),
+        filename=state.get("filename", ""),
+        title=state.get("title", ""),
+        status=state.get("status", ""),
+        pages=int(state.get("pages", 0) or 0),
+        blocks=int(state.get("blocks", 0) or 0),
+        chunks=int(state.get("chunks", 0) or 0),
+        parse_sec=float(state.get("parse_sec", 0) or 0),
+        pages_per_sec=float(state.get("pages_per_sec", 0) or 0),
+        error=state.get("error", "") or "",
+        updated_at=state.get("updated_at", "") or "",
+    )
+
+
+async def _save_paper_upload(file: UploadFile):
+    import paper_ingest
+
+    name = _safe_filename(file.filename or "")
+    if Path(name).suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="论文上传仅支持 PDF")
+    raw = Path(config.PAPERS_RAW_DIR)
+    raw.mkdir(parents=True, exist_ok=True)
+    dest = raw / name
+    dest.write_bytes(await _read_upload(file))
+    sha = paper_ingest.sha256_file(dest)
+    pid = paper_ingest.paper_id(sha)
+    state = paper_ingest.load_state(pid) or paper_ingest._new_state(dest, sha)
+    if state.get("status") in ("normalized", "indexed"):
+        return PaperUploadItem(paper_id=pid, filename=name, status=state["status"])
+    state.update(
+        status="queued", stage="queued", error="",
+        updated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+    )
+    paper_ingest.save_state(state)
+    _PAPER_QUEUE.put((dest, False))
+    return PaperUploadItem(paper_id=pid, filename=name, status="queued")
+
+
+@app.post("/papers", response_model=PaperUploadResponse, tags=["papers"], dependencies=[Depends(require_paper_profile)])
+async def upload_papers(files: list[UploadFile] = File(...)):
+    """批量上传 PDF：落盘 + 入队，立即返回 queued；单 worker 逐篇解析，避免并发 MinerU。"""
+    _ensure_paper_workers()
+    items = [await _save_paper_upload(f) for f in files]
+    import paper_ingest
+
+    paper_ingest.write_manifest()
+    return PaperUploadResponse(files=items)
+
+
+@app.get("/papers", response_model=PaperList, tags=["papers"], dependencies=[Depends(require_paper_profile)])
+def list_papers():
+    import paper_ingest
+
+    return PaperList(papers=[_paper_info(s) for s in paper_ingest.list_states()])
+
+
+@app.get("/papers/{paper_id}", response_model=PaperInfo, tags=["papers"], dependencies=[Depends(require_paper_profile)])
+def get_paper(paper_id: str):
+    return _paper_info(_paper_state_or_404(paper_id))
+
+
+@app.post("/papers/{paper_id}/reparse", response_model=PaperActionResponse, tags=["papers"], dependencies=[Depends(require_paper_profile)])
+def reparse_paper(paper_id: str):
+    state = _paper_state_or_404(paper_id)
+    pdf = _paper_pdf(state)
+    try:
+        get_vector_store(auto_rebuild=False).delete(where={"sha256": state["sha256"]})
+    except Exception:
+        pass
+    state.update(
+        status="queued", stage="queued", error="",
+        updated_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+    )
+    import paper_ingest
+
+    paper_ingest.save_state(state)
+    paper_ingest.write_manifest()
+    _ensure_paper_workers()
+    _PAPER_QUEUE.put((pdf, True))
+    return PaperActionResponse(paper_id=paper_id, status="queued")
+
+
+@app.delete("/papers/{paper_id}", response_model=PaperDeleteResponse, tags=["papers"], dependencies=[Depends(require_paper_profile)])
+def delete_paper(paper_id: str, delete_raw: bool = False):
+    import shutil
+
+    import paper_index
+    import paper_ingest
+
+    state = _paper_state_or_404(paper_id)
+    try:
+        paper_index.delete_paper(paper_id)
+    except Exception:
+        pass
+    norm = Path(config.PAPERS_DIR) / "normalized" / f"{paper_id}.json"
+    if norm.exists():
+        norm.unlink()
+    parsed = Path(config.PAPERS_DIR) / "parsed" / paper_id
+    if parsed.is_dir():
+        shutil.rmtree(parsed, ignore_errors=True)
+    state_path = Path(config.PAPERS_DIR) / "_state" / f"{paper_id}.json"
+    if state_path.exists():
+        state_path.unlink()
+    raw_deleted = False
+    if delete_raw:
+        pdf = Path(state.get("source_path", ""))
+        if pdf.exists():
+            pdf.unlink()
+            raw_deleted = True
+    paper_ingest.write_manifest()
+    return PaperDeleteResponse(deleted=True, paper_id=paper_id, raw_deleted=raw_deleted)
+
+
+@app.get("/papers/{paper_id}/blocks", response_model=PaperBlocksResponse, tags=["papers"], dependencies=[Depends(require_paper_profile)])
+def paper_blocks(paper_id: str, page: int | None = None):
+    _paper_state_or_404(paper_id)
+    path = Path(config.PAPERS_DIR) / "normalized" / f"{paper_id}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="该论文尚未完成归一化")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    pages = data.get("pages") or []
+    if page is not None:
+        pages = [p for p in pages if p.get("page") == page]
+        if not pages:
+            raise HTTPException(status_code=404, detail=f"第 {page} 页不存在")
+    return PaperBlocksResponse(
+        paper_id=paper_id, n_pages=int(data.get("n_pages", 0)), pages=pages
+    )
+
+
+@app.get("/papers/{paper_id}/pages/{page:int}.png", tags=["papers"], dependencies=[Depends(require_paper_profile)])
+def paper_page_png(paper_id: str, page: int, blocks: str = ""):
+    """页图 + 可选 bbox 高亮；**不提供整本 PDF 下载**。"""
+    state = _paper_state_or_404(paper_id)
+    pdf = _paper_pdf(state)
+    path = Path(config.PAPERS_DIR) / "normalized" / f"{paper_id}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="该论文尚未完成归一化")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    n_pages = int(data.get("n_pages", 0))
+    if page < 1 or page > n_pages:
+        raise HTTPException(status_code=404, detail=f"页码越界: {page}/{n_pages}")
+    import page_render
+
+    ids = ",".join(blocks.split(",")[:100])
+    boxes = page_render.bboxes_for_blocks(paper_id, ids, page=page)
+    try:
+        png = page_render.render_page_png(pdf, page, blocks=[{"bbox": b} for b in boxes])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"页图渲染失败: {e}")
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 # ==================== 索引管理 ====================

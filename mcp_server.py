@@ -57,6 +57,12 @@ _COURSE_RETRIEVE_DESC = (
     "本描述不写死延迟数字以免随硬件/版本过期。"
 )
 
+_PAPER_RETRIEVE_DESC = (
+    "检索本地论文库（已由 MinerU 解析并索引的论文），返回带《论文名》+ 物理页码 + 章节 + "
+    "相关性分数的文本块，作为论文问答的事实依据。与 course_retrieve 共用同一检索实现；"
+    "论文库 profile 下优先使用本工具。mode=accurate（默认）混合检索+精排；mode=fast 为降级档。"
+)
+
 _LIST_DOCUMENTS_DESC = (
     "列出本地课程知识库中**已建索引**的文档（教材 / 课件 / 笔记）及其文本块数量，"
     "用于在检索前先判断知识边界：这个问题涉及的内容库里到底有没有、该用哪本书的关键词去检索。"
@@ -121,7 +127,15 @@ def _retrieve_real(query: str, top_k: int, mode: str) -> str:
         source = Path(doc.metadata.get("source", "unknown")).name
         score = doc.metadata.get("rerank_score") or doc.metadata.get("hybrid_score")
         start = doc.metadata.get("start_index")
-        meta = f"来源: {source}"
+        if doc.metadata.get("paper_id"):
+            title = doc.metadata.get("paper_title") or source
+            page = doc.metadata.get("page")
+            section = doc.metadata.get("section")
+            meta = f"来源: 《{title}》第 {page} 页"
+            if section:
+                meta += f" | 章节: {section}"
+        else:
+            meta = f"来源: {source}"
         if score is not None:
             meta += f" | 相关性分数: {float(score):.3f}"
         if start is not None:
@@ -251,6 +265,15 @@ def course_retrieve(
 ) -> str:
     # top_k 刻意不在签名上声明 ge/le：Field 边界会被 SDK 直接拒绝（强制模型重试），
     # 而手写版契约是服务端静默钳制（越界值直接收编，零重试）——契约保持不变。
+    return _retrieve_impl(query, top_k, mode)
+
+
+@server.tool(description=_PAPER_RETRIEVE_DESC, structured_output=False)
+def paper_retrieve(
+    query: Annotated[str, Field(description="论文内容问题或检索词")],
+    top_k: Annotated[int, Field(description="返回的文本块数量")] = 5,
+    mode: Literal["fast", "accurate"] = "accurate",
+) -> str:
     return _retrieve_impl(query, top_k, mode)
 
 
