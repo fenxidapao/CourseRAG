@@ -32,6 +32,88 @@ def _extract_json(text: str):
         return None
 
 
+def _norm(text: str) -> str:
+    """归一：去空白、标点、LaTeX 转义与大小写差异后比对。
+
+    两处必须归一，否则证据永远对不上：
+      - MinerU 数学文本是 `0 . 9 8` 这种带空格形式；
+      - 裁判转录 evidence 时常加转义（`\\$beta _ { 2 } \\= 0 . 9 8`）。
+    """
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", (text or "").lower())
+
+
+def _bigrams(text: str) -> set:
+    """字符二元组集合：中英混排都能粗粒度衡量"这段和回答是否讲同一件事"。"""
+    text = re.sub(r"\s+", "", text.lower())
+    return {text[i : i + 2] for i in range(len(text) - 1)}
+
+
+def _trim_context(context: str, answer: str, max_chars: int) -> str:
+    """按与回答的相关度裁剪上下文，避免超出裁判的 num_ctx。
+
+    2026-10-30 实测：8 块上下文 19,223 字符 = 10,836 token，glm4:9b（num_ctx=8192）
+    直接 400 exceed_context_size，verify_grounded 吞异常按 0.0 判不接地 →
+    正确答案被当幻觉拒掉（15 题里 2 例）。裁判不该被上下文长度拖垮。
+    按段切分（grounded_generate 用 "\\n\\n" 拼块），优先保留与回答共享二元组最多的段，
+    保持原始顺序，超预算则整段丢弃；单段超预算时截断。
+    """
+    if len(context) <= max_chars:
+        return context
+    blocks = [b for b in context.split("\n\n") if b.strip()]
+    if not blocks:
+        return context[:max_chars]
+    ans_grams = _bigrams(answer)
+    ranked = sorted(
+        range(len(blocks)),
+        key=lambda i: len(ans_grams & _bigrams(blocks[i])),
+        reverse=True,
+    )
+    keep, total = set(), 0
+    for i in ranked:
+        size = len(blocks[i]) + 2
+        if total + size > max_chars:
+            continue
+        keep.add(i)
+        total += size
+    if not keep:  # 单段就超预算 → 截断最相关那段
+        return blocks[ranked[0]][:max_chars]
+    return "\n\n".join(blocks[i] for i in sorted(keep))
+
+
+_JUDGE_SYSTEM = (
+    "你是严谨的 RAG 接地裁判。只依据给定的【上下文】判断，严禁使用外部知识。"
+    "必须只输出一个 JSON 对象，不要任何额外文字或解释。"
+)
+
+
+def judge_messages(context: str, answer: str):
+    """裁判 messages（抽出来供探针/测试复用，避免探针与生产 prompt 漂移）。"""
+    user = f"""【上下文】
+{context}
+
+【回答】
+{answer}
+
+任务：
+1. 把【回答】拆成若干条彼此独立的陈述（statements），一条只讲一个事实，
+   数字、单位、公式要单独成句（例如"beta2 取 0.98"不能和"优化器是 Adam"合并）。
+   不要拆分任务指令、格式说明等任何非回答内容。
+2. 对每条陈述判断是否能被【上下文】直接支持（supported 为 true/false）。
+3. supported=true 时，必须在 evidence 里**逐字复制**【上下文】中支撑它的连续片段
+   （不超过 60 字，不许改写、不许拼接、不许跨段合并）。上下文中找不到这样的原文，
+   就判 supported=false。
+4. 陈述中的数值、单位、符号必须与 evidence 原文完全一致：原文写 0.98 而陈述写 0.999，
+   一律 supported=false；陈述里自行推算出的、上下文没写过的数值也算不被支持。
+5. 计算 score = 被支撑的陈述数 / 总陈述数（0~1，保留两位小数）。
+
+只输出 JSON，格式：
+{{"statements": [{{"statement": "陈述内容", "supported": true, "evidence": "上下文原文片段"}}], "score": 0.0}}"""
+    return [
+        {"role": "system", "content": _JUDGE_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
 def verify_grounded(context: str, answer: str) -> dict:
     """
     判定回答是否完全基于上下文。
@@ -44,34 +126,10 @@ def verify_grounded(context: str, answer: str) -> dict:
     if not context or not answer:
         return {"grounded": False, "score": 0.0, "detail": []}
 
-    system = (
-        "你是严谨的 RAG 接地裁判。只依据给定的【上下文】判断，严禁使用外部知识。"
-        "必须只输出一个 JSON 对象，不要任何额外文字或解释。"
-    )
-    user = f"""【上下文】
-{context}
+    context = _trim_context(context, answer, config.GROUNDED_CONTEXT_MAX_CHARS)
 
-【回答】
-{answer}
-
-任务：
-1. 只把【回答】的正文拆成若干条彼此独立的陈述（statements）。
-   不要拆分任务指令、格式说明等任何非回答内容。
-2. 对每条陈述，判断是否能从【上下文】中直接推导或支持（supported 为 true/false）。
-3. 计算 score = 被支撑的陈述数 / 总陈述数（0~1，保留两位小数）。
-
-只输出 JSON，格式：
-{{"statements": [{{"statement": "陈述内容", "supported": true}}], "score": 0.0}}"""
-
-    # 裁判最多重试 2 次；失败 → grounded=False（安全侧）。
-    # C2（2026-10-16）：此前这里直接 _judge_client.chat 调本地 Ollama，
-    # 完全忽略 config.JUDGE_PROVIDER —— config 注释与 README 都宣称可切云端，
-    # 但生产 /query 的 grounded 自检实际仍跑本地裁判。现统一走 llm_provider.judge_chat。
+    messages = judge_messages(context, answer)
     parsed = {}
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
     for _ in range(3):
         try:
             parsed = _extract_json(llm_provider.judge_chat(messages, temperature=0.0)) or {}
@@ -81,6 +139,18 @@ def verify_grounded(context: str, answer: str) -> dict:
             parsed = {}
 
     detail = parsed.get("statements", []) if isinstance(parsed.get("statements"), list) else []
+    # 裁判自称"有原文支撑"不算数：evidence 必须能在上下文里逐字找到。
+    # 2026-10-30 实测：9B 裁判会把"β2=0.999"判 supported（上下文原文 0.98），
+    # 却只引"我们使用 Adam 优化器"——证据回验把这类放水判成不支撑。
+    if config.GROUNDED_REQUIRE_EVIDENCE and detail:
+        ctx_norm = _norm(context)
+        for it in detail:
+            if not isinstance(it, dict) or it.get("supported") is not True:
+                continue
+            ev = _norm(it.get("evidence", ""))
+            if len(ev) < 4 or ev not in ctx_norm:
+                it["supported"] = False
+                it["evidence_ok"] = False
     # 评审 P2（2026-08-30）：与 eval_local 同口径——分数从明细重算，不信裁判自报。
     # 门控场景取「明细重算」与「裁判自报」的较小值（更保守）：
     #   - 裁判漏列陈述时（P2 复核实测：自报 0.6 但明细 2/2 全 true），漏列的往往是

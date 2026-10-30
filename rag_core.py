@@ -40,6 +40,7 @@ from rag_search_utils import (
     route_sources,
     is_enum_query,
 )
+import rag_search_utils
 
 import ollama
 import chromadb
@@ -50,6 +51,10 @@ from reranker import rerank_documents
 import grounding  # P1 接地自检（grounding 仅依赖 config/ollama，无循环依赖）
 import semantic_cache  # 统一问答入口的缓存查询/写入（仅依赖 config/ollama，无循环依赖）
 import visual_rerank as _visual_rerank  # B1 视觉重排（仅依赖 config，无循环依赖）
+
+if config.APP_PROFILE == "paper":
+    # 课程 SOURCE_RULES 不用于论文库；SOURCE_RULES 本身保留给 course/test_core
+    rag_search_utils.ACTIVE_SOURCE_RULES = []
 
 
 # ====================== 0. 轻量客户端 / Document ======================
@@ -407,9 +412,16 @@ def clean_garbled_chunk(text):
     return "".join(kept)
 
 
-def load_and_chunk_documents(directory=config.DATA_DIR):
+def load_and_chunk_documents(directory=None):
+    if config.APP_PROFILE == "paper":
+        try:
+            from paper_index import load_paper_chunks
+        except ImportError:
+            print("[warn] paper profile 尚未接入 paper_index（M2 前）；返回空块")
+            return []
+        return load_paper_chunks()
     # 支持 PDF / DOCX / TXT / MD；TXT/MD 强制 utf-8（Windows 中文坑，直接写死避免再踩）
-    directory = Path(directory)
+    directory = Path(directory or config.DATA_DIR)
     documents = []
     for path in sorted(directory.rglob("*")):
         if not path.is_file():
@@ -565,7 +577,7 @@ def get_embeddings():
     return _OllamaEmbeddingFunction(_client, config.EMBEDDING_MODEL)
 
 
-_COLLECTION_NAME = "course_rag"  # 中性集合名（不再沿用 langchain_chroma 遗留的 'langchain' 名，避免旧 ef 元数据冲突）
+_COLLECTION_NAME = config.COLLECTION_NAME  # profile 决定：course_rag / paper_rag
 _chroma_client = None
 _vector_store = None
 
@@ -575,6 +587,33 @@ def _get_chroma_client():
     if _chroma_client is None:
         _chroma_client = chromadb.PersistentClient(path=config.PERSIST_DIRECTORY)
     return _chroma_client
+
+
+def _assert_safe_persist_dir(persist_dir):
+    """rmtree 前守卫：禁止删仓库根/语料目录/另一 profile 的索引目录。"""
+    resolved = Path(persist_dir).resolve()
+    repo_root = Path(__file__).resolve().parent
+    forbidden = {
+        repo_root,
+        (repo_root / "data").resolve(),
+        (repo_root / "data" / "教材").resolve(),
+        (repo_root / "data" / "papers" / "raw").resolve(),
+    }
+    if resolved in forbidden:
+        raise RuntimeError(f"拒绝删除危险路径: {resolved}")
+    course_dirs = {
+        Path(os.getenv("PERSIST_DIRECTORY", "./chroma_db")).resolve(),
+        (repo_root / "chroma_db").resolve(),
+        (repo_root / "chroma_db_m3").resolve(),
+    }
+    paper_dirs = {
+        Path(os.getenv("PAPER_PERSIST_DIRECTORY", "./chroma_db_papers")).resolve(),
+        (repo_root / "chroma_db_papers").resolve(),
+    }
+    if config.APP_PROFILE == "paper" and resolved in course_dirs:
+        raise RuntimeError(f"paper profile 拒绝删除课程索引目录: {resolved}")
+    if config.APP_PROFILE == "course" and resolved in paper_dirs:
+        raise RuntimeError(f"course profile 拒绝删除论文索引目录: {resolved}")
 
 
 def get_vector_store(chunks=None, auto_rebuild=True):
@@ -601,12 +640,8 @@ def get_vector_store(chunks=None, auto_rebuild=True):
         # "Non-empty lists are required" —— data/ 空目录重建索引时直接崩溃。
         # 空库也应返回有效集合句柄（count()==0），问答/健康检查照常工作。
         if chunks:
-            ids = [
-                hashlib.md5(
-                    f"{d.metadata['source']}::{d.metadata['start_index']}".encode("utf-8")
-                ).hexdigest()
-                for d in chunks
-            ]
+            # 稳定 id 统一由 _stable_ids 生成：论文块优先 chunk_uid，课程块 md5(source::start_index)
+            ids = _stable_ids(chunks)
             # B3 修复（2026-10-16）：向量嵌入与正文分离。
             # documents 存全文（BM25/精排/生成/B1 词面通道都用它），
             # 但 embeddings 由 metadata["embed_text"]（短描述）算出——避免逐字转写稀释向量。
@@ -633,6 +668,7 @@ def get_vector_store(chunks=None, auto_rebuild=True):
         except Exception as e:
             print(f"[warn] 已有向量库无法加载（{e}），将清空并重建：{config.PERSIST_DIRECTORY}")
             import shutil
+            _assert_safe_persist_dir(config.PERSIST_DIRECTORY)
             shutil.rmtree(config.PERSIST_DIRECTORY, ignore_errors=True)
             _chroma_client = chromadb.PersistentClient(path=config.PERSIST_DIRECTORY)
             _vector_store = _chroma_client.get_or_create_collection(
@@ -651,6 +687,10 @@ def get_vector_store(chunks=None, auto_rebuild=True):
 # ====================== 2.1 增量索引 + 去重（P1-4） ======================
 def chunk_file(path):
     """切分单个文件为 Document 列表（P1-4 增量索引用；metadata 同 load_and_chunk_documents）。"""
+    if config.APP_PROFILE == "paper":
+        # paper profile 的增量入口走 paper_index/paper_ingest；M2 接入
+        print("[warn] paper profile 不支持 chunk_file 课程路径；忽略")
+        return []
     path = Path(path)
     text = _load_text(path)
     if not text or not text.strip():
@@ -1059,10 +1099,16 @@ def is_hard_reject(docs):
 
 
 # 硬拒答标准文案（语料外明确拒，而非软提示；符合系统提示「宁可少答不可错答」）。
-HARD_REJECT_ANSWER = (
-    "根据提供的课程资料无法回答该问题——检索到的内容与问题不相关（资料可能不足，"
-    "或该问题超出本课程范围）。建议补充相关教材/笔记后重试，或换一种更贴近课程知识点的问法。"
-)
+if config.APP_PROFILE == "paper":
+    HARD_REJECT_ANSWER = (
+        "根据提供的论文库无法回答该问题——检索到的内容与问题不相关（论文库可能未收录，"
+        "或该问题超出已索引论文范围）。建议补充相关论文后重试，或换一种更贴近论文内容的问法。"
+    )
+else:
+    HARD_REJECT_ANSWER = (
+        "根据提供的课程资料无法回答该问题——检索到的内容与问题不相关（资料可能不足，"
+        "或该问题超出本课程范围）。建议补充相关教材/笔记后重试，或换一种更贴近课程知识点的问法。"
+    )
 
 
 def grounded_generate(question, docs, chain):
@@ -1124,6 +1170,19 @@ def _build_prompt(rules, history, context, question, sources=None):
 回答："""
 
 
+def _block_header(i, d):
+    """上下文段落头：`[n]《论文名》第 N 页 · 章节\n`（无页信息时退回 `[n] `）。"""
+    page = d.metadata.get("page")
+    if not page:
+        return f"[{i}] "
+    title = d.metadata.get("paper_title") or Path(d.metadata.get("source", "unknown")).stem
+    head = f"[{i}]《{title}》第 {int(page)} 页"
+    section = d.metadata.get("section")
+    if section:
+        head += f" · {section}"
+    return head + "\n"
+
+
 class RagChain:
     """替代 LCEL 链：持有 history / custom_prompt，invoke(question) 走 向量召回→重排→生成。"""
 
@@ -1138,23 +1197,56 @@ class RagChain:
         # 不传则自行检索（eval_local 等场景），保持向后兼容。
         if docs is None:
             docs = retrieve_and_rerank(question)
-        context = "\n\n".join(d.page_content for d in docs)
+        # paper 页级引用：context 段前直接标 [n]，与【已知来源】编号对齐。
+        # 2026-10-30 实测：只给来源列表、正文不带编号时，模型经常把 [n] 数错
+        # （答对 h=8 却标了第 4 页而不是第 5 页）。显式编号避免"数第几段"。
+        # 2026-10-30 实测：只给 [n] 时模型仍会挂错段——同一事实的"擦边块"（只提到 350GB、
+        # 不含 1.2TB）被标成来源，或把结论段落标成摘要段。段头补上「论文名·第 N 页·章节」，
+        # 模型可按页/章节判断哪段真正包含该事实，页级引用命中率 0.733 → 见 README 基线。
+        label_mode = config.CITATION_LABEL_MODE
+        context = "\n\n".join(
+            (_block_header(i, d) + d.page_content if label_mode == "page" else d.page_content)
+            for i, d in enumerate(docs, 1)
+        )
 
         # P1-2 内联引用：把检索到的块按 1..N 编号，供 prompt 要求 LLM 用 [n] 标注来源。
         # 编号顺序与 context 段落顺序一致，app.py 引用区与之一一对应。
         sources = []
         for i, d in enumerate(docs, 1):
-            name = Path(d.metadata.get("source", "unknown")).name
-            off = d.metadata.get("start_index")
-            sources.append(f"{i}. {name}（offset={off}）")
+            title = d.metadata.get("paper_title")
+            page = d.metadata.get("page")
+            section = d.metadata.get("section")
+            mode = config.CITATION_LABEL_MODE
+            use_page = bool(page) and (
+                mode == "page" or (mode == "auto" and d.metadata.get("paper_id"))
+            )
+            if use_page:
+                label = f"{i}. 《{title or Path(d.metadata.get('source', 'unknown')).stem}》第 {int(page)} 页"
+                if section:
+                    label += f" · {section}"
+                sources.append(label)
+            else:
+                name = Path(d.metadata.get("source", "unknown")).name
+                off = d.metadata.get("start_index")
+                sources.append(f"{i}. {name}（offset={off}）")
 
+        rules = SYSTEM_RULES
+        if config.APP_PROFILE == "paper":
+            rules += (
+                "\n7. 引用页码只能抄自【已知来源】中「第 N 页」的数字，"
+                "不得自行推算、改写或编造页码。"
+                "\n8. 选择 [n] 时必须引用真正包含该事实的段落：上下文每段开头的"
+                "《论文名》与「第 N 页 · 章节」就是判断依据；问题指名章节时"
+                "（如结语、实验、摘要），优先引用该章节所在段落，"
+                "不要把只沾边的段落（例如只出现同一个数字、却不含该结论的段落）当来源。"
+                "\n9. 段首的 [n] 是该段编号：引用时必须在句末原样写出 [n]。"
+                "即使用正文里已经写了论文名或页码，也不能用它替代 [n] 标注。"
+            )
         if self.custom_prompt and self.custom_prompt.strip():
-            rules = f"""{SYSTEM_RULES}
+            rules = f"""{rules}
 
 【用户补充要求】
 {self.custom_prompt.strip()}"""
-        else:
-            rules = SYSTEM_RULES
 
         return _build_prompt(rules, self.history, context, question, sources=sources)
 
@@ -1255,6 +1347,22 @@ def build_citations(docs):
             "score": score,
             "start_index": d.metadata.get("start_index"),
         }
+        # 论文块：透出论文名/物理页/章节/块类型（三出口共用同一结构）
+        if d.metadata.get("paper_id"):
+            c.update(
+                {
+                    "paper_id": d.metadata.get("paper_id"),
+                    "title": d.metadata.get("paper_title")
+                    or Path(d.metadata.get("source", "unknown")).stem,
+                    "page": d.metadata.get("page"),
+                    "page_start": d.metadata.get("page_start"),
+                    "page_end": d.metadata.get("page_end"),
+                    "section": d.metadata.get("section"),
+                    "block_type": d.metadata.get("block_type"),
+                    "block_ids": d.metadata.get("block_ids"),
+                    "type": d.metadata.get("block_type") or "text",
+                }
+            )
         # P2 多模态：图像块透出 type/image_path/page（UI 引用区渲染原图；文本块不加这些键）
         if d.metadata.get("type") == "image":
             c["type"] = "image"

@@ -9,6 +9,13 @@ chroma_db_broken*/
 chroma_db_v1/
 # 当前活跃索引（bge-m3 / 1024 维；不入库，可重建）
 chroma_db_m3/
+# 论文库 v2.1：论文 PDF / 解析产物 / 论文索引 / 独立 MinerU venv / React 构建产物
+data/papers/
+chroma_db_papers*/
+venv-mineru/
+frontend/node_modules/
+frontend/dist/
+eval_results_paper*.csv
 __pycache__/
 *.pyc
 

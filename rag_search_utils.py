@@ -123,13 +123,13 @@ def _rrf_fuse(ranked_lists, top_n, rrf_k=60):
 
 
 def _stable_ids(chunks):
-    """稳定 id = md5(source::start_index)。同一文件同一块 → 同一 id，upsert 天然去重。"""
-    return [
-        hashlib.md5(
-            f"{d.metadata['source']}::{d.metadata['start_index']}".encode("utf-8")
-        ).hexdigest()
-        for d in chunks
-    ]
+    """稳定 id：优先 chunk_uid（论文块），否则 md5(source::start_index)（课程块）。"""
+    ids = []
+    for d in chunks:
+        uid = d.metadata.get("chunk_uid")
+        key = str(uid) if uid else f"{d.metadata['source']}::{d.metadata['start_index']}"
+        ids.append(hashlib.md5(key.encode("utf-8")).hexdigest())
+    return ids
 
 
 # ====================== P1a：教材级规则路由（2026-09-04） ======================
@@ -182,6 +182,10 @@ SOURCE_RULES = [
      ["算法引论"]),
 ]
 
+# 路由实际使用的规则表：rag_core 在 paper profile 下置空（课程规则不适用于论文库）。
+# SOURCE_RULES 本身永远保留完整课程规则，test_core.py 的 len(SOURCE_RULES)>=10 不受影响。
+ACTIVE_SOURCE_RULES = SOURCE_RULES
+
 
 def route_sources(question, sources):
     """规则路由：question 命中 SOURCE_RULES 关键词 → 返回允许的 source 路径列表。
@@ -196,7 +200,7 @@ def route_sources(question, sources):
     if not q:
         return None
     patterns = []
-    for keywords, src_patterns in SOURCE_RULES:
+    for keywords, src_patterns in ACTIVE_SOURCE_RULES:
         if any(kw in q for kw in keywords):
             patterns.extend(src_patterns)
     if not patterns:

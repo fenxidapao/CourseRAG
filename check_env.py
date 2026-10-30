@@ -24,6 +24,7 @@ REQUIRED = {
     "streamlit": "streamlit",
     "dotenv": "python-dotenv",
     "pypdf": "pypdf",
+    "pymupdf": "pymupdf",
     "docx": "python-docx",
     "sentence_transformers": "sentence-transformers",
 }

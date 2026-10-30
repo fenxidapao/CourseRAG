@@ -25,7 +25,11 @@ import config
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.abspath(os.path.join(ROOT, config.PERSIST_DIRECTORY))
-BACKUP_ROOT = os.path.join(ROOT, "chroma_db_backups")
+# profile 分目录：course 沿用旧目录，paper 单独放，避免 restore 覆盖错库
+BACKUP_ROOT = os.path.join(
+    ROOT,
+    "chroma_db_backups" if config.APP_PROFILE == "course" else f"chroma_db_backups_{config.APP_PROFILE}",
+)
 
 
 def _now_ts():
@@ -38,7 +42,7 @@ def _chunk_count():
         return 0
     try:
         client = chromadb.PersistentClient(path=SRC)
-        col = client.get_or_create_collection("course_rag")
+        col = client.get_or_create_collection(config.COLLECTION_NAME)
         return col.count()
     except Exception as e:
         print(f"[warn] 读取块数失败（按 0 计）: {e!r}")

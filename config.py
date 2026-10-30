@@ -13,15 +13,30 @@ load_dotenv()
 # 或 shell 环境变量覆盖（setdefault 不会覆盖已存在的同名变量）。
 os.environ.setdefault("HF_ENDPOINT", os.getenv("HF_ENDPOINT", "https://hf-mirror.com"))
 
+# ---------- 应用 profile（2026-10-29 论文库 v2.1）----------
+# paper：论文库（MinerU + paper_rag）；course：v1.1 课程版（归档在 tag/branch 上）。
+# 切换 profile 必须重启进程；paper 下不读取 .env 的 PERSIST_DIRECTORY，避免误用课程索引。
+APP_PROFILE = os.getenv("APP_PROFILE", "paper").strip().lower()
+if APP_PROFILE not in ("paper", "course"):
+    raise ValueError(f"APP_PROFILE 只支持 paper/course，当前值: {APP_PROFILE!r}")
+
 # ---------- 模型与运行时（来自 .env，给默认值便于本地直接跑）----------
 # C1（2026-10-16）：嵌入模型由 nomic-embed-text(768维) 换为 bge-m3(1024维)。
 # 为什么换：nomic 是英文中心模型，中文语料相似度基线偏高（config 下方阈值注释早有记录）；
 # bge-m3 是多语言/中文友好模型，维度 768→1024。
 # ⚠️ 换嵌入模型必须**全量重建索引**，不能复用旧 collection（维度不兼容）。
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "bge-m3")
+EMBEDDING_MODEL = (
+    os.getenv("PAPER_EMBEDDING_MODEL", os.getenv("EMBEDDING_MODEL", "bge-m3"))
+    if APP_PROFILE == "paper"
+    else os.getenv("EMBEDDING_MODEL", "bge-m3")
+)
 LLM_MODEL = os.getenv("LLM_MODEL", "llama3.1:8b")
 # Ollama 默认本地端口；换机器/远程只需改这里
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+# 本地模型上下文窗口（2026-10-30 实测）：不设时 Ollama 默认 4096，
+# 而 8 个 chunk + 系统规则 + 回答常超 4096 → 后半段证据被静默截断，
+# 实测导致「121 个课题」「28.4 BLEU」直接答不出或答错。8192 后可稳定答对。
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
 
 # ---------- 裁判模型提供方（C2 去本地化，2026-10-16）----------
 # 为什么裁判也必须切云：生产 /query 的 grounded 自检走 grounding.py，默认本地
@@ -43,6 +58,18 @@ JUDGE_API_KEY = os.getenv("JUDGE_API_KEY", "")
 JUDGE_DISABLE_THINKING = os.getenv("JUDGE_DISABLE_THINKING", "true").strip().lower() == "true"
 JUDGE_MAX_TOKENS = int(os.getenv("JUDGE_MAX_TOKENS", "4096"))
 JUDGE_MAX_TOKENS_CAP = int(os.getenv("JUDGE_MAX_TOKENS_CAP", "8192"))
+# 本地裁判输出上限（2026-10-30 实测）：Ollama 路径原先不传 num_predict，
+# 一次接地判断在 1.7B 上生成到 40960 token（重复循环，见 server.log task 412761），
+# 单次耗时 545s；grounding.verify_grounded 还会重试 3 次 → 一条问答可挂 27 分钟。
+# 裁判输出是陈述 JSON（2026-10-30 起每条带 evidence 原文片段），
+# 1200 不够 8 块上下文的长回答；1600 在 num_ctx=8192 下仍留足余量。
+JUDGE_LOCAL_MAX_TOKENS = int(os.getenv("JUDGE_LOCAL_MAX_TOKENS", "1600"))
+# 本地裁判重复惩罚：glm4:9b 在长 JSON（带 evidence）输出上会退化成重复同一陈述，
+# 撞满 num_predict 后 JSON 截断、解析失败被当成"不接地"误杀。
+# 2026-10-30 复测：1.3 会**改变判断本身**——上下文逐字写着 "Transformer (big) … 28.4 BLEU"，
+# 裁判仍判 supported=false（faithfulness 1.0 → 0.0）；降到 1.1 后同一输入判定正确，
+# 且 2 题 × 四指标 + 真实 8 块上下文接地调用均正常收尾（未复现循环）。1.5 输出不成形。
+JUDGE_LOCAL_REPEAT_PENALTY = float(os.getenv("JUDGE_LOCAL_REPEAT_PENALTY", "1.1"))
 
 # ---------- 生成模型提供方（C3 去本地化，2026-10-15）----------
 # 背景：本地 llama3.1:8b（约 4.9 GB 显存）+ 裁判 qwen2.5:7b（约 4.7 GB）
@@ -102,7 +129,11 @@ RERANKER_MODEL = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")  # 多�
 RERANKER_DEVICE = os.getenv("RERANKER_DEVICE", "auto")
 # 半精度开关（默认关）：fp16 推理再快约一倍，但 rerank_score 会轻微漂移——
 # 硬拒答阈值 HARD_REJECT_RERANK_THRESHOLD=0.30 按 fp32 校准，开 fp16 前必须重验 B 组拒答行为。
-RERANKER_FP16 = os.getenv("RERANKER_FP16", "false").lower() == "true"
+RERANKER_FP16 = (
+    os.getenv("PAPER_RERANKER_FP16", "true").lower() == "true"
+    if APP_PROFILE == "paper"
+    else os.getenv("RERANKER_FP16", "false").lower() == "true"
+)
 # GPU 上批量打分的 batch（16=候选池全量一次过；CPU 上该值无感）
 RERANKER_BATCH_SIZE = int(os.getenv("RERANKER_BATCH_SIZE", "16"))
 RETRIEVE_K = int(os.getenv("RETRIEVE_K", "50"))       # 向量召回候选数（扩到 50：难 query 正确块常排 30+，池不够捞不到；配合 reranker 精排纠回）
@@ -128,7 +159,13 @@ BM25_TOP_K = int(os.getenv("BM25_TOP_K", "50"))  # BM25 通道独立召回数（
 # 问题命中教材/课程关键词（rag_search_utils.SOURCE_RULES）时，向量路与 BM25 路都
 # 限定到对应教材再 RRF 融合；未命中关键词 = 全库检索（行为与旧版一致）。
 # 关闭后自动路由失效，但显式 source 参数（API/UI 指定教材）仍可用。
-SOURCE_FILTER_ROUTING_ENABLED = os.getenv("SOURCE_FILTER_ROUTING_ENABLED", "true").lower() == "true"
+# paper profile 不使用课程 SOURCE_RULES（规则由 ACTIVE_SOURCE_RULES 控制，rag_core 按 profile 设置）；
+# SOURCE_RULES 本身保留，test_core 的课程规则断言不受影响。
+SOURCE_FILTER_ROUTING_ENABLED = (
+    os.getenv("SOURCE_FILTER_ROUTING_ENABLED", "true").lower() == "true"
+    if APP_PROFILE == "course"
+    else False
+)
 
 # ---------- 枚举/穷举类查询的锚点扩展召回（2026-09-11）----------
 # 背景（held-out A 组 30 题逐题核算）：5 道枚举/清单类题只占 16.7% 题量，却吃掉
@@ -161,8 +198,43 @@ ENUM_CANDIDATE_K = int(os.getenv("ENUM_CANDIDATE_K", "40"))        # 枚举题�
 ENUM_RERANK_TOP_N = int(os.getenv("ENUM_RERANK_TOP_N", "14"))      # 枚举题最终进 LLM 的块数（常规为 RERANKER_TOP_N=8）
 
 # ---------- 路径 ----------
+# DATA_DIR 永远是课程语料根（app.py/main.py/ingest_ocr.py 依赖它）；语义不变。
 DATA_DIR = os.getenv("DATA_DIR", "./data")
-PERSIST_DIRECTORY = os.getenv("PERSIST_DIRECTORY", "./chroma_db")
+PAPERS_DIR = os.getenv("PAPERS_DIR", "./data/papers")
+PAPERS_RAW_DIR = os.getenv("PAPERS_RAW_DIR", os.path.join(PAPERS_DIR, "raw"))
+if APP_PROFILE == "paper":
+    COLLECTION_NAME = os.getenv("COLLECTION_NAME", "paper_rag")
+    # 结构上忽略 .env 的 PERSIST_DIRECTORY（课程库路径），避免误用课程索引
+    PERSIST_DIRECTORY = os.getenv("PAPER_PERSIST_DIRECTORY", "./chroma_db_papers")
+else:
+    COLLECTION_NAME = os.getenv("COLLECTION_NAME", "course_rag")
+    PERSIST_DIRECTORY = os.getenv("PERSIST_DIRECTORY", "./chroma_db")
+
+# ---------- 论文库 / MinerU（2026-10-29 v2.1）----------
+# MINERU_PYTHON 支持绝对路径（中文路径失败时可指向 ASCII 盘，如 E:\mineru_venv\...）
+MINERU_PYTHON = os.getenv("MINERU_PYTHON", "./venv-mineru/Scripts/python.exe")
+MINERU_DEVICE = os.getenv("MINERU_DEVICE", "auto").strip().lower()
+MINERU_BACKEND = os.getenv("MINERU_BACKEND", "pipeline")
+MINERU_LANG = os.getenv("MINERU_LANG", "ch")
+MINERU_TIMEOUT = int(os.getenv("MINERU_TIMEOUT", "1800"))
+# 默认 modelscope：2.7.6 默认走 huggingface，本机 hf-mirror 常 429（2026-10-29 实测）
+MINERU_MODEL_SOURCE = os.getenv("MINERU_MODEL_SOURCE", "modelscope").strip()
+# 起点与课程 CHUNK_SIZE 同口径（800）；1200 无实测依据，M5 做 600/800/1200 A/B 后再改
+# M5 A/B（2026-10-29，15 题页级）：600→0.933/0.800，800→0.933/0.867，1200→1.000/0.933
+# （page_hit@8 / page_strict@1）→ 胜者 1200，改默认；换回 800 需重标阈值。
+PAPER_CHUNK_MAX_CHARS = int(os.getenv("PAPER_CHUNK_MAX_CHARS", "1200"))
+PAPER_CHUNK_MIN_CHARS = int(os.getenv("PAPER_CHUNK_MIN_CHARS", "200"))
+PAPER_CHUNK_CROSS_PAGE = os.getenv("PAPER_CHUNK_CROSS_PAGE", "false").lower() == "true"
+PAPER_FALLBACK_ENABLED = os.getenv("PAPER_FALLBACK_ENABLED", "false").lower() == "true"
+# 批量上传/CLI 的 MinerU 并发上限：默认 1，避免 10 个文件同时起进程
+PARSE_CONCURRENCY = max(1, int(os.getenv("PARSE_CONCURRENCY", "1")))
+CITATION_LABEL_MODE = os.getenv(
+    "CITATION_LABEL_MODE", "page" if APP_PROFILE == "paper" else "offset"
+).strip().lower()
+if CITATION_LABEL_MODE not in ("page", "auto", "offset"):
+    raise ValueError(
+        f"CITATION_LABEL_MODE 只支持 page/auto/offset，当前值: {CITATION_LABEL_MODE!r}"
+    )
 
 # ---------- 加载（T6: 扫描版 PDF 检测） ----------
 # 均字符/页 低于此阈值视为无文字层（扫描版），建库时告警跳过而非静默空索引。
@@ -182,7 +254,13 @@ PDF_MIN_CHARS_PER_PAGE = int(os.getenv("PDF_MIN_CHARS_PER_PAGE", "30"))
 # C1 重标定（2026-10-16，bge-m3）：原 0.69 按 nomic 分布取语料内 p5；
 # 新模型实测 30 题语料内 p5=0.604、p10=0.694，20 题语料外 median=0.518/max=0.763。
 # 取 0.62（≈p5~p10）：软提示命中约 3~5% 语料内题。
-LOW_CONFIDENCE_THRESHOLD = float(os.getenv("LOW_CONFIDENCE_THRESHOLD", "0.62"))
+if APP_PROFILE == "paper":
+    # M5 重标定（2026-10-29，paper_rag 198 块 / 1200 字切分 / bge-m3 / bge-reranker）：
+    # 20 域内题最低 top1 向量 0.486 → 软提示取 0.50（误提示 ≤1/20）；
+    # 不是课程值（课程 0.62 来自另一套语料分布）。
+    LOW_CONFIDENCE_THRESHOLD = float(os.getenv("PAPER_LOW_CONFIDENCE_THRESHOLD", "0.50"))
+else:
+    LOW_CONFIDENCE_THRESHOLD = float(os.getenv("LOW_CONFIDENCE_THRESHOLD", "0.62"))
 
 # ---------- 硬拒答 / 生成接地自检（P1，2026-08-24 工程化落地） ----------
 # 软提示（LOW_CONFIDENCE_THRESHOLD）仍保留给「快速模式」；此处为「精确模式」的硬拒答闸门：
@@ -194,11 +272,35 @@ LOW_CONFIDENCE_THRESHOLD = float(os.getenv("LOW_CONFIDENCE_THRESHOLD", "0.62"))
 # 实测校准：启用后跑 eval_heldout.py（B 组拒答率应 ≥90%），据结果回调阈值。
 # C1 重标定（2026-10-16，bge-m3）：0.58 在实测表上误拒语料内 1/30=3.3%、
 # 放过语料外约 30%（比 0.55 更紧一点，且误拒率不变）；语料外漏拒由 reranker 阈值 + 接地自检兜底。
-HARD_REJECT_VECTOR_THRESHOLD = float(os.getenv("HARD_REJECT_VECTOR_THRESHOLD", "0.58"))
-HARD_REJECT_RERANK_THRESHOLD = float(os.getenv("HARD_REJECT_RERANK_THRESHOLD", "0.30"))
-GROUNDED_VERIFY_ENABLED = os.getenv("GROUNDED_VERIFY_ENABLED", "true").lower() == "true"
+if APP_PROFILE == "paper":
+    # M5 重标定（2026-10-29，1200 字切分）：20 域外 + 20 域内网格搜索结果
+    # vec=0.40 / rr=0.20 → 域外拒答 19/20=95%、域内误拒 0/20=0%。
+    # 余量：域内最低向量 0.486（阈值 0.40）、最低 rerank 0.29（阈值 0.20）；
+    # 域外 Mamba 题 rr=0.342 被放过（唯一漏拒）。不是课程值。
+    HARD_REJECT_VECTOR_THRESHOLD = float(
+        os.getenv("PAPER_HARD_REJECT_VECTOR_THRESHOLD", "0.40")
+    )
+    HARD_REJECT_RERANK_THRESHOLD = float(
+        os.getenv("PAPER_HARD_REJECT_RERANK_THRESHOLD", "0.20")
+    )
+else:
+    HARD_REJECT_VECTOR_THRESHOLD = float(os.getenv("HARD_REJECT_VECTOR_THRESHOLD", "0.58"))
+    HARD_REJECT_RERANK_THRESHOLD = float(os.getenv("HARD_REJECT_RERANK_THRESHOLD", "0.30"))
+# 论文库默认关闭（2026-10-30 决定）：裁判复核是 8 GB 卡上唯一的"第二模型"，
+# 实测 7B 生成 + 精排已占 7737/8188 MiB，裁判无法与生成同时常驻；
+# 且本地裁判 30 对校准最好的是 glm4:9b（0.97，仍有 1 例误放行）。
+# 课程版维持 true；需要开启时显式 GROUNDED_VERIFY_ENABLED=true。
+_grounded_default = "false" if APP_PROFILE == "paper" else "true"
+GROUNDED_VERIFY_ENABLED = os.getenv("GROUNDED_VERIFY_ENABLED", _grounded_default).lower() == "true"
 # grounded 自检：回答被支撑比例（faithfulness 口径）低于此值 → 判未接地，触发硬拒替换。
 GROUNDED_SCORE_THRESHOLD = float(os.getenv("GROUNDED_SCORE_THRESHOLD", "0.60"))
+# 裁判输入上下文上限（字符）。8 块上下文实测 19,223 字符 = 10,836 token，
+# 超过本地裁判 num_ctx=8192 会直接 400，被判不接地误杀正确答案；9000 字符 ≈ 5.1k token，
+# 加系统提示 + 输出预留（JUDGE_LOCAL_MAX_TOKENS）仍留余量。
+GROUNDED_CONTEXT_MAX_CHARS = int(os.getenv("GROUNDED_CONTEXT_MAX_CHARS", "9000"))
+# 裁判必须给出可逐字命中的 evidence 原文，否则该条陈述判不被支撑。
+# 关掉它等于相信裁判自述（实测会把 β2=0.999 判成有据，而原文是 0.98）。
+GROUNDED_REQUIRE_EVIDENCE = os.getenv("GROUNDED_REQUIRE_EVIDENCE", "true").lower() == "true"
 
 # ---------- 多用户预留扩展点（P2 / Gate 2，2026-08-24） ----------
 # 默认全部关闭：本地 / 局域网部署零摩擦。将来要并发 Web 服务，开开关即可，不必重写后端。
@@ -316,3 +418,8 @@ IMAGE_CAPTIONS_CSV = os.getenv("IMAGE_CAPTIONS_CSV", "_image_captions.csv")
 # 故嵌入与 BM25 用 v1 短描述（判别力强），生成与引用用新 caption（信息全）。
 # 置空字符串 = 不分离，退回单 caption 行为。
 IMAGE_EMBED_CAPTIONS_CSV = os.getenv("IMAGE_EMBED_CAPTIONS_CSV", "_image_captions_v1_qwen25vl.csv")
+
+
+def profile_summary():
+    """当前 profile 的索引入口三元组（启动打印/测试用；不在 import 时 print）。"""
+    return APP_PROFILE, COLLECTION_NAME, PERSIST_DIRECTORY

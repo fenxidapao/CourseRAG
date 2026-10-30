@@ -142,18 +142,33 @@ def _get_ollama_client():
     if _ollama_client is None:
         import ollama
 
-        _ollama_client = ollama.Client(host=config.OLLAMA_BASE_URL)
+        # 必须有超时：本地模型进入重复循环时不会自己停，httpx 默认无超时会永久挂住
+        _ollama_client = ollama.Client(host=config.OLLAMA_BASE_URL, timeout=config.LLM_TIMEOUT)
     return _ollama_client
 
 
-def _ollama_chat(messages, temperature, model):
-    opts = {"temperature": temperature} if temperature is not None else None
-    resp = _get_ollama_client().chat(model=model, messages=messages, options=opts)
+def _ollama_options(temperature, max_tokens=None, repeat_penalty=None):
+    opts = {"num_ctx": getattr(config, "OLLAMA_NUM_CTX", 8192)}
+    if temperature is not None:
+        opts["temperature"] = temperature
+    if max_tokens:
+        opts["num_predict"] = int(max_tokens)
+    if repeat_penalty:
+        opts["repeat_penalty"] = float(repeat_penalty)
+    return opts
+
+
+def _ollama_chat(messages, temperature, model, max_tokens=None, repeat_penalty=None):
+    resp = _get_ollama_client().chat(
+        model=model,
+        messages=messages,
+        options=_ollama_options(temperature, max_tokens, repeat_penalty),
+    )
     return resp["message"]["content"]
 
 
 def _ollama_chat_stream(messages, temperature, model):
-    opts = {"temperature": temperature} if temperature is not None else None
+    opts = _ollama_options(temperature)
     stream = _get_ollama_client().chat(
         model=model, messages=messages, options=opts, stream=True
     )
@@ -437,7 +452,11 @@ def judge_chat(messages, temperature=0.0) -> str:
             budget=getattr(config, "JUDGE_MAX_TOKENS", 4096),
             cap=getattr(config, "JUDGE_MAX_TOKENS_CAP", 8192),
         )
-    return _ollama_chat(messages, temperature, config.JUDGE_MODEL)
+    return _ollama_chat(
+        messages, temperature, config.JUDGE_MODEL,
+        max_tokens=getattr(config, "JUDGE_LOCAL_MAX_TOKENS", 1600),
+        repeat_penalty=getattr(config, "JUDGE_LOCAL_REPEAT_PENALTY", 1.3),
+    )
 
 
 def judge_api_key() -> str:
