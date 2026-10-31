@@ -43,7 +43,7 @@ jobs:
         run: python -m pytest test_api.py test_api_papers.py -v
 
       - name: 论文管线单测（normalize / chunker / citation，零外部依赖）
-        run: python -m pytest test_paper_normalize.py test_paper_chunk.py test_paper_citation.py -v
+        run: python -m pytest test_paper_normalize.py test_paper_chunk.py test_paper_citation.py test_paper_routing.py -v
 
       - name: profile 默认值契约（子进程，零外部依赖）
         run: python -m pytest test_config_profile.py -v

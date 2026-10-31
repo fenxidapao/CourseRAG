@@ -25,6 +25,7 @@ rag_core.py — RAG 核心（W1 三件套 + W2 重排增强 + 引用溯源封装
 import os
 import math
 import re
+import json
 import hashlib
 from pathlib import Path
 
@@ -812,13 +813,15 @@ def _resolve_source_filter(question, source_filter):
     """P1a：统一解析教材过滤意图。返回允许的 source 路径列表或 None（不过滤）。
 
     source_filter 语义（retrieve_and_rerank / answer_question 对外统一）：
-      - None        → 自动路由：rag_search_utils.route_sources 按问题关键词规则表
-                      决定是否限定教材（SOURCE_FILTER_ROUTING_ENABLED 关闭时不路由）
+      - None        → 自动路由：paper profile 先看题名路由（v3.2），未命中再走课程关键词规则
       - str         → 显式子串（API/UI 传入），resolve_source_query 解析；
                       解析失败 raise ValueError（上层转 400 / UI 报错）
       - list[str]   → 显式 source 路径列表（程序化调用直传）
     """
     if source_filter is None:
+        if config.APP_PROFILE == "paper":
+            route = paper_route(question)
+            return [route["source"]] if route else None
         if not config.SOURCE_FILTER_ROUTING_ENABLED:
             return None
         try:
@@ -830,6 +833,94 @@ def _resolve_source_filter(question, source_filter):
         return resolve_source_query(source_filter)
     allowed = [str(s) for s in source_filter]
     return allowed or None
+
+
+# ====================== 3.05 论文题名路由（v3.2，2026-10-30） ======================
+# 触发：问题里出现某篇论文**第 1 页以「Full Name (ACRO)」定义过**的缩写（HyDE / FiD …）。
+# 只认这种定义，避免把 RAG / LLM 这类跨篇通用词当别名；同一个缩写被多篇定义时丢弃（宁可不用）。
+# 命中后：检索限定到该 paper_id（向量 + BM25 两路都限定），并跳过检索前硬拒答。
+_ACRO_DEF = re.compile(
+    r"([A-Za-z][A-Za-z0-9\-]*(?:\s+[A-Za-z0-9\-]+){0,8})\s*\(([A-Za-z][A-Za-z0-9\-]{1,9})\)"
+)
+# "Low-Rank Adaptation, or LoRA" 型定义（LoRA 原文就是这么写的，括号型抓不到）
+_ACRO_OR = re.compile(
+    r"([A-Za-z][A-Za-z0-9\-]*(?:\s+[A-Za-z0-9\-]+){0,8})\s*,\s*or\s+([A-Za-z][A-Za-z0-9\-]{1,9})"
+)
+# "Fusion-in-Decoder" 这类连字符方法的首字母缩写（FiD）——FiD 全篇没有 "(FiD)" 写法
+_HYPHEN_NAME = re.compile(r"\b([A-Z][A-Za-z0-9]*(?:-[A-Za-z][A-Za-z0-9]*){2,4})\b")
+_ACRO_STOP = {
+    # 通用词：跨论文使用，不能当别名
+    "rag", "llm", "llms", "gpt", "bert", "nlp", "qa", "ir", "ai", "ml", "dl", "gpu", "cpu",
+    "api", "json", "pdf", "html", "ocr", "rlhf", "sft", "ood", "nli", "sota",
+    # 基准 / 数据集 / 指标 / 机构名（2026-10-30 实测会被误当论文自称缩写）
+    "mmlu", "sts", "nlg", "ict", "icl", "mrc", "ptm", "qfs", "nf4", "fp", "etf",
+    "laaj", "pek", "ukp-tuda", "oasst1", "mllms", "nl2sql", "generator",
+}
+_paper_route_cache = None
+
+
+def _acronyms_from_text(text):
+    """文本 → {缩写小写: 原文写法}；只收含大写字母、2~10 字符、非通用词的条目。"""
+    out = {}
+    candidates = [m.group(2) for m in _ACRO_DEF.finditer(text or "")]
+    candidates += [m.group(2) for m in _ACRO_OR.finditer(text or "")]
+    for m in _HYPHEN_NAME.finditer(text or ""):
+        acro = "".join(part[0] for part in m.group(1).split("-"))
+        if len(acro) >= 3:
+            candidates.append(acro)
+    for acro in (c.strip() for c in candidates):
+        if len(acro) < 2 or len(acro) > 10 or acro.lower() in _ACRO_STOP:
+            continue
+        if not any(c.isupper() for c in acro):
+            continue
+        out.setdefault(acro.lower(), acro)
+    return out
+
+
+def paper_acronym_map():
+    """扫描 normalized 第 1 页构建「缩写 → 论文」表；跨篇重名缩写不收录。"""
+    global _paper_route_cache
+    if _paper_route_cache is not None:
+        return _paper_route_cache
+    norm_dir = Path(config.PAPERS_DIR) / "normalized"
+    by_acro = {}
+    for p in sorted(norm_dir.glob("*.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        pages = data.get("pages") or []
+        # 前两页足够覆盖摘要 + 引言里的定义（FiD 的 "Fusion-in-Decoder" 首次出现在第 2 页图注）
+        first = " ".join(
+            (b.get("text") or "") for pg in pages[:2] for b in (pg.get("blocks") or [])
+        )
+        src = data.get("source_pdf") or ""
+        if not src:
+            continue
+        pid = data.get("paper_id") or p.stem
+        for acro in _acronyms_from_text(first):
+            by_acro.setdefault(acro, []).append({"paper_id": pid, "source": src, "acronym": acro})
+    _paper_route_cache = {a: v[0] for a, v in by_acro.items() if len(v) == 1}
+    return _paper_route_cache
+
+
+def paper_route(question):
+    """问题命中论文自称缩写 → {"paper_id","source","acronym"}；否则 None。
+
+    路由是增强项：任何异常都返回 None（退回全库检索），不影响主链路。
+    """
+    if not getattr(config, "PAPER_TITLE_ROUTING_ENABLED", False) or config.APP_PROFILE != "paper":
+        return None
+    try:
+        routes = paper_acronym_map()
+    except Exception as e:
+        print(f"[warn] 题名路由构建失败，忽略: {e!r}")
+        return None
+    low = (question or "").lower()
+    for acro in sorted(routes, key=len, reverse=True):
+        if re.search(r"(?<![a-z0-9])" + re.escape(acro) + r"(?![a-z0-9])", low):
+            return routes[acro]
+    return None
 
 
 # ====================== 3.1 混合检索（向量 + BM25 双通道，RRF 融合） ======================
@@ -1472,6 +1563,7 @@ def answer_question(question, mode="accurate", custom_prompt=None, history="",
                 "docs": None, "cached": True, "cache_sim": cached["sim"],
                 "rewritten": (rewritten if rewrite_ok and rewritten != question else None),
                 "rejected": False, "reject_signal": None,
+                "route_paper_id": None,
                 "grounding_ran": False, "grounded": True,
                 "not_grounded": False, "grounded_score": None,
                 "low_confidence": False,
@@ -1480,6 +1572,7 @@ def answer_question(question, mode="accurate", custom_prompt=None, history="",
     # 2) 检索（accurate=混合+可选精排；fast=纯向量；P1a：source 教材过滤/自动路由；
     #    检索用 search_question——改写的全部意义就在这：让检索看到完整语义）
     stage("retrieve")
+    _paper_route = paper_route(search_question) if source is None else None
     docs = retrieve_and_rerank(
         search_question, force_no_rerank=(mode != "accurate"), source_filter=source
     )
@@ -1488,9 +1581,12 @@ def answer_question(question, mode="accurate", custom_prompt=None, history="",
     citations = build_citations(docs)
 
     # 3) 硬拒答（仅精确模式；快速模式保留软提示 low_confidence，不拦）
+    #    题名路由命中时跳过：问题里已点名某篇论文的自称缩写，属域内，阈值误杀应让路（v3.2）。
     rejected, reject_signal = False, None
     if mode == "accurate":
         rejected, reject_signal = is_hard_reject(docs)
+        if _paper_route:
+            rejected, reject_signal = False, None
 
     # 3.5) 检索阶段回调（SSE 流式出口用）：此刻 citations 与硬拒答判定均已就绪，
     #      调用方可在生成开始前就把「引用 + 是否拒答」推给客户端——拒答时前端
@@ -1536,6 +1632,7 @@ def answer_question(question, mode="accurate", custom_prompt=None, history="",
         "cached": False, "cache_sim": None,
         "rewritten": (rewritten if rewrite_ok and rewritten != question else None),
         "rejected": rejected, "reject_signal": reject_signal,
+        "route_paper_id": _paper_route["paper_id"] if _paper_route else None,
         "grounding_ran": grounding_ran, "grounded": grounded,
         "not_grounded": not_grounded, "grounded_score": grounded_score,
         "low_confidence": bool(conf is not None and conf < config.LOW_CONFIDENCE_THRESHOLD),

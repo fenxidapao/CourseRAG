@@ -226,6 +226,12 @@ PAPER_CHUNK_MAX_CHARS = int(os.getenv("PAPER_CHUNK_MAX_CHARS", "1200"))
 PAPER_CHUNK_MIN_CHARS = int(os.getenv("PAPER_CHUNK_MIN_CHARS", "200"))
 PAPER_CHUNK_CROSS_PAGE = os.getenv("PAPER_CHUNK_CROSS_PAGE", "false").lower() == "true"
 PAPER_FALLBACK_ENABLED = os.getenv("PAPER_FALLBACK_ENABLED", "false").lower() == "true"
+# 题名路由（v3.2，2026-10-30）：问题命中某篇论文第 1 页定义过的自称缩写（如 HyDE / FiD）时，
+# 把检索限定到该 paper_id 并跳过检索前硬拒答。实测两例域内误拒都是"检索对但被阈值杀"或
+# "缩写词向量分低"，限定篇内即可绕开。关闭开关即回到旧行为（2026-10-30 前的全库检索）。
+PAPER_TITLE_ROUTING_ENABLED = (
+    os.getenv("PAPER_TITLE_ROUTING_ENABLED", "true").lower() == "true"
+)
 # 批量上传/CLI 的 MinerU 并发上限：默认 1，避免 10 个文件同时起进程
 PARSE_CONCURRENCY = max(1, int(os.getenv("PARSE_CONCURRENCY", "1")))
 CITATION_LABEL_MODE = os.getenv(
