@@ -16,19 +16,29 @@
   `--audit`：缺页 0、跨页 0、缺章节 20（1.5%）。
 - 阈值（论文库专用）：`vec=0.40 / rerank=0.20 / low=0.50`；
   18 篇池下 20 域外 + 20 域内门控：**拒答 90%（18/20）、域内误拒 0%**；
+  注意域内误拒**不是 0**：扩到 30 题页级集后才暴露 **2/30**（HyDE 检索对但精排 0.159 误杀、
+  FiD 向量 0.379 漏召回）；题名路由（v3.2）上线后 **0/30**。20 题门控与阈值标定同源，偏乐观。
   两道漏拒（BERT MLM 0.702/0.740、Mamba 0.478/0.341）与域内最低分重叠，阈值不可分，需接地判官。
   负样本已按扩容重标（RAG / Llama 2 MMLU 变域内 → 换 DoRA / KTO），旧 95% 与新 90% 非同题集，不可比。
   held-out 10+10：800 切分（3 篇）域外 100%、**域内误拒 20%**；
   1200 切分（18 篇，2026-10-30 只跑一次）域外 **100%**、域内误拒 **10%（1/10，论文作者/期刊题被精排 0.133 拦下）**
   → 仍未达 5% 目标，按纪律不回调阈值。
-- 页级评测（**30 题覆盖 18 篇**，2026-10-30 扩题）：paper_hit@8 **0.967（29/30）** / page_hit@8 **0.900（27/30）** /
+- 页级评测（**30 题覆盖 18 篇**，2026-10-30 扩题）：paper_hit@8 **1.000（30/30）** / page_hit@8 **0.967（29/30）** /
   page_strict@1 **0.700（21/30）**；原 15 题子集仍是 1.000 / 1.000 / 0.867——**15 题口径偏乐观，对外用 30 题**。
+  路由前同题集是 0.967 / 0.900 / 0.700（`PAPER_TITLE_ROUTING_ENABLED=false` 可复现），路由只修正了 HyDE/FiD 两题。
 - 回答质量（2026-10-30，qwen2.5:7b 生成 / glm4:9b 裁判）：15 题归一化后 faith 0.603 / prec 0.801 / recall 0.633 /
-  cite 0.867；**30 题引用页 0.600（18/30）**：原 15 题 14/15、新增 15 题 4/15，另有 2 题（HyDE/FiD）被硬拒。
-  双裁判对照：qwen2.5:7b 当裁判 faith 0.874（明显更宽松）→ 四指标只报趋势。无 `[n]` 答案 0/15。
+  cite 0.867；**30 题引用三种口径（v3.2，2026-10-31）**：
+  - `cite_page_strict`（[n] 命中人工登记的首次出现页）**0.600（18/30）**；
+  - `cite_page_support`（被引页本身含证据，关键词核验）**0.967（29/30）**，只有 GraphRAG 一题被引页不含结论；
+  - `cite_supported`（被引 **chunk** 是否支持该句，glm4:9b）**0.538 句级（28/52）/ 0.500 整题（15/30）**；
+    人工复核 24 条被判不支持的句子：5 条判官假阴性（表格/多断言）、1 条无实质陈述、6 条部分支持，
+    修正后 **0.647 句级（33/51）/ 0.600 整题（18/30）**。
+  **三种口径不能互相替代**：页对≠块对，约 1/3 带引用的答案点了正确页、但 chunk 里没有该事实。
+  双裁判对照：qwen2.5:7b 当裁判 faith 0.874（明显更宽松）→ 四指标只报趋势。无 `[n]` 答案 0/15、0/30。
 - **公式数字拆字已修**（v3.1 P0）：`normalize_math_spacing()` 只在 `$...$` 内合并 `0 . 9 8` → `0.98`；
   数学段内拆字 0（1790 段仅 1 处 `$` 跨 `<td>` 误配）；索引 1324→1323 块。
-  但 **Q3 仍答 0.999**：7B 忽略排在最前的短块；把首块移到末尾 Q3 3/3 答对，全量 cite 却 0.867→0.733 → 不改顺序。
+  但 **Q3 仍不稳定**（2026-10-31 路由轮答对 0.98；此前多轮答 0.999）：7B 会忽略排在最前的短块；
+  把首块移到末尾 Q3 3/3 答对，全量 cite 却 0.867→0.733 → 不改顺序。
 - 本地模型（v3 定稿）：生成 `LLM_PROVIDER=ollama` / `LLM_MODEL=qwen2.5:7b`（稳态 8.2 s/题，峰值 7737/8188 MiB）；
   裁判 `JUDGE_PROVIDER=local` / `JUDGE_MODEL=glm4:9b`，但 **paper 下 `GROUNDED_VERIFY_ENABLED` 默认 false**
   （8 GB 卡上 7B 生成 + 9B 裁判无法同驻）；关的只是"生成后复核"，检索前硬拒答阈值照常生效，
@@ -43,17 +53,20 @@
 - MinerU 2.7.6 在 **`E:\mineru_venv`**（ASCII；中文路径下 fasttext 打不开 Unicode venv），
   `.env` 里 `MINERU_PYTHON=E:/mineru_venv/Scripts/python.exe`；模型源默认 modelscope。
 - 课程版：tag `v1.1-course-final` / 分支 `archive/course-v1.1`；课程索引 `chroma_db_m3` 未动。
-- 测试：`test_paper_normalize / test_paper_chunk / test_paper_citation / test_api_papers / test_config_profile` 已入 CI；
-  离线全量 **84 passed**。
+- 测试：`test_paper_normalize / test_paper_chunk / test_paper_citation / test_paper_routing / test_api_papers / test_config_profile` 已入 CI；
+  离线全量 **170 passed**（不含需 Ollama + 索引的 `test_retrieval.py`）。
+  注意 `test_api.py` 依赖 import 时 `APP_PROFILE=course`：**必须让它先于 paper 套件收集**
+  （CI 里 `test_api.py test_api_papers.py` 的顺序），否则 config 先以 paper 导入，4 条上传/删除用例会假失败。
 - 断点与恢复指引：仓库外 `CourseRAG-实现记录.md` 末尾「断点」节（先读它）。
 
 ## 2.1 未完成（恢复后从这里开始）
 
 - v3 P0 已完成：paper 默认关接地门 + `test_config_profile.py` + 文档口径。
-- v3 P1：`eval_paper_quality.py`（四指标 + `answer_cite_page_acc`，两段跑）；**未开始**。
-- v3 P2：`eval_paper.py --group reject --heldout`（1200 切分）只跑一次；分批本地 commit（push 等用户点头）。
-- 仍未闭：云端裁判 key 401（带接地的 UI 验收待重跑）；held-out 域内误拒 20%（800 切分）未达标；
-  关闸后 7B 的数值错答会直接返回（见 §2）；最终 commit/push 未做。
+- v3.1 已完成：公式数字归一化、裁判假阴性定性、题集 15→30、四指标与引用页重跑。
+- v3.2 已完成：引用第二口径（`--stage citecheck`，三种口径见 §2）、题名路由
+  （`PAPER_TITLE_ROUTING_ENABLED`，含 `test_paper_routing.py`）、README/AGENTS 口径同步。
+- 仍未闭：云端裁判 key 401（带接地的 UI 验收待重跑）；held-out 域内误拒 10%（1200 切分，只跑一次）未达 5% 目标；
+  30 题四指标尚未跑（目前只有 15 题口径）；push 需用户点头。
 - 历史（已完成，留档）：M5 的 qwen3:4b/llama3.1:8b 读数已被 v3 的 qwen2.5:7b 方案取代；
   `qwen3:8b` 未下载（用户决定不急），8B 档延迟/显存 UNVERIFIED。
   M6 的解析抽检 15/15、MCP paper e2e、CI、Docker slim 981 MB `/health` 200 均已完成。
@@ -103,11 +116,16 @@ python -m pytest test_retrieval.py -v        # 需 Ollama + 已建索引
 python paper_ingest.py --dir data/papers/raw --only-new   # MinerU 解析 → normalized
 python paper_index.py --rebuild                            # normalized → 索引
 python paper_index.py --audit                              # 100% 有页 / 0 跨页
-python eval_paper.py --group page --gate                   # 页级评测 15 题
+python eval_paper.py --group page --gate --cases all       # 页级评测 30 题（默认 all；base=原 15 题）
 python eval_paper.py --group reject --scan                 # 阈值扫描
 python eval_paper.py --group reject --gate                 # 拒答门控
 python eval_paper.py --group reject --heldout              # held-out 只跑一次
-python -m pytest test_paper_normalize.py test_paper_chunk.py test_paper_citation.py test_api_papers.py -v
+# 回答质量：两段式，7B 与 9B 不能同驻（8 GB 卡）
+python eval_paper_quality.py --stage generate --cases all  # qwen2.5:7b 答题
+ollama stop qwen2.5:7b
+python eval_paper_quality.py --stage judge                 # glm4:9b 四指标
+python eval_paper_quality.py --stage citecheck             # glm4:9b 引用 chunk 支撑
+python -m pytest test_paper_normalize.py test_paper_chunk.py test_paper_citation.py test_paper_routing.py test_api_papers.py -v
 
 # 前端（论文库）
 cd frontend; npm run dev      # Vite proxy /api → 127.0.0.1:8000
