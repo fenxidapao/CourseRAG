@@ -1,18 +1,23 @@
-"""eval_paper_quality.py — 论文库回答质量四指标 + 引用页准确率（v3 P1，2026-10-30）
+"""eval_paper_quality.py — 论文库回答质量四指标 + 引用口径（v3/v3.2，2026-10-30）
 
 两段式（8 GB 显存：7B 生成与 9B 裁判不能同驻）：
-  1) --stage generate：qwen2.5:7b 逐题答题，落 _gen.csv（含检索块，供裁判阶段复用）
+  1) --stage generate：qwen2.5:7b 逐题答题，落 _gen.csv（含检索块，供后续阶段复用）
   2) ollama stop qwen2.5:7b
   3) --stage judge：glm4:9b 打分（直接复用 eval_local 的四指标），落 _judge.csv
+  4) --stage citecheck：glm4:9b 判「带 [n] 的句子是否被第 n 条 chunk 支撑」，落 _cite.csv
 
-指标：faithfulness / answer_relevancy / context_precision / context_recall（均来自 eval_local）
-     + answer_cite_page_acc：回答里的 [n] 映射到 citations[n-1].page，命中 expected_pages 记 1。
-硬拒答题（rejected=1）不计入四指标均值，单独计数；引用页准确率只统计有引用的作答。
+指标：
+  - faithfulness / answer_relevancy / context_precision / context_recall（来自 eval_local）
+  - answer_cite_page_acc（cite_page_strict）：[n] → citations[n-1].page 命中 expected_pages 记 1；
+    这是**严格下界**——事实若在别页重复，命中也不算。
+  - cite_supported：每个带 [n] 的句子 → 对应的第 n 条 chunk 是否支持该句（v3.2 第二口径）。
+硬拒答题不计入四指标均值；引用口径只统计有引用的作答。
 
 运行：
   python eval_paper_quality.py --stage generate
   ollama stop qwen2.5:7b
   python eval_paper_quality.py --stage judge
+  python eval_paper_quality.py --stage citecheck
 """
 import argparse
 import csv
@@ -27,6 +32,7 @@ import time
 from types import SimpleNamespace
 
 import config
+import llm_provider
 import rag_core
 from eval_data_paper import PAGE_CASES, PAGE_CASES_ALL
 
@@ -36,6 +42,102 @@ METRICS = ("faithfulness", "answer_relevancy", "context_precision", "context_rec
 def used_pages(answer, cites):
     idxs = sorted({int(x) for x in re.findall(r"\[(\d+)\]", answer)})
     return [cites[i - 1] for i in idxs if 1 <= i <= len(cites)]
+
+
+_CITE_SYS = "你是严格的 RAG 引用核验器：只判断【证据段落】是否支持【陈述】，不要使用外部知识。只输出一个 JSON 对象。"
+_SENT_SPLIT = re.compile(r"(?<=[。！？!?\n])")
+
+
+def _cited_sentences(answer):
+    """拆句，只保留带 [n] 的句子；返回 [(句子, [n...])]。
+
+    纯引用标记的碎片（如单独一行的 `[1][7]`）并入前一句，否则会被当成空陈述送审。
+    """
+    frags = []
+    for s in _SENT_SPLIT.split(answer or ""):
+        s = s.strip()
+        if not s:
+            continue
+        if not re.sub(r"\[(\d+)\]", "", s).strip(" \t\r\n。；;，,、.!！?？") and frags:
+            frags[-1] = frags[-1] + " " + s
+            continue
+        frags.append(s)
+    out = []
+    for s in frags:
+        idxs = sorted({int(x) for x in re.findall(r"\[(\d+)\]", s)})
+        if idxs:
+            out.append((s, idxs))
+    return out
+
+
+def _judge_support(sentence, chunk):
+    """裁判判一条陈述是否被证据段落支持；异常/解析失败按不支持处理（保守）。"""
+    user = f"""【证据段落】
+{chunk[:3000]}
+
+【陈述】
+{sentence[:600]}
+
+这条陈述中的事实是否能由【证据段落】直接支持？只输出 JSON：{{"supported": true/false}}"""
+    try:
+        out = llm_provider.judge_chat(
+            [{"role": "system", "content": _CITE_SYS}, {"role": "user", "content": user}],
+            temperature=0.0,
+        )
+    except Exception:
+        return False
+    m = re.search(r'"supported"\s*:\s*(true|false)', out or "", re.I)
+    return bool(m) and m.group(1).lower() == "true"
+
+
+def run_citecheck(gen_csv="", limit=0):
+    if not gen_csv:
+        cands = sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                              "eval_results_paper_quality_*_gen.csv")))
+        if not cands:
+            sys.exit("找不到 *_gen.csv，先跑 --stage generate")
+        gen_csv = cands[-1]
+    with open(gen_csv, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    if limit:
+        rows = rows[:limit]
+
+    out_rows = []
+    for r in rows:
+        blocks = json.loads(r.get("contexts_json") or "[]")
+        total = supported = 0
+        detail = []
+        for sent, idxs in _cited_sentences(r.get("answer", "")):
+            total += 1
+            ok = any(1 <= n <= len(blocks) and _judge_support(sent, blocks[n - 1]) for n in idxs)
+            supported += int(ok)
+            detail.append({"sentence": sent[:120], "cites": idxs, "supported": ok})
+        row = {k: v for k, v in r.items() if k != "contexts_json"}
+        row["cite_sentences"] = total
+        row["cite_supported_frac"] = round(supported / total, 3) if total else None
+        row["cite_supported_all"] = int(total > 0 and supported == total)
+        row["cite_detail"] = json.dumps(detail, ensure_ascii=False)
+        out_rows.append(row)
+        print(f"{r['idx']:>2} sentences={total} supported={supported} "
+              f"page_hit={r['cite_hit']}", flush=True)
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = gen_csv.replace("_gen.csv", f"_cite_{ts}.csv")
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(out_rows[0].keys()))
+        w.writeheader()
+        w.writerows(out_rows)
+
+    judged = [x for x in out_rows if x["cite_sentences"]]
+    sents = sum(x["cite_sentences"] for x in judged)
+    sup = sum(round(x["cite_supported_frac"] * x["cite_sentences"]) for x in judged)
+    all_ok = sum(x["cite_supported_all"] for x in judged)
+    page_ok = sum(int(x["cite_hit"]) for x in out_rows)
+    print(f"\n[csv] {path}")
+    print(f"[cite] questions={len(out_rows)} with_citation={len(judged)} "
+          f"page_strict={page_ok}/{len(out_rows)}={page_ok/len(out_rows):.3f}")
+    print(f"       sentence_support={sup}/{sents}={sup/sents:.3f}  "
+          f"question_all_supported={all_ok}/{len(judged)}={all_ok/max(1,len(judged)):.3f}")
 
 
 def _write_csv(path, rows):
@@ -70,7 +172,7 @@ def run_generate(limit=0, cases_mode="base"):
             "used_pages": "/".join(map(str, used)),
             "cite_hit": hit,
             "latency_s": latency,
-            "answer": answer[:700],
+            "answer": answer[:2000],
             "contexts_json": json.dumps(blocks, ensure_ascii=False),
         })
         print(f"{i:02d} cite_hit={hit} used={rows[-1]['used_pages'] or '-'} "
@@ -149,7 +251,7 @@ def run_judge(gen_csv="", limit=0):
 
 def main():
     ap = argparse.ArgumentParser(description="论文库回答质量评估（两段式）")
-    ap.add_argument("--stage", choices=["generate", "judge"], required=True)
+    ap.add_argument("--stage", choices=["generate", "judge", "citecheck"], required=True)
     ap.add_argument("--gen-csv", default="", help="judge 阶段指定输入 CSV（默认取最新）")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 题（冒烟用）")
     ap.add_argument("--cases", default="base", choices=["base", "all"],
@@ -157,6 +259,8 @@ def main():
     args = ap.parse_args()
     if args.stage == "generate":
         run_generate(args.limit, args.cases)
+    elif args.stage == "citecheck":
+        run_citecheck(args.gen_csv, args.limit)
     else:
         run_judge(args.gen_csv, args.limit)
 

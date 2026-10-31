@@ -60,7 +60,18 @@ def test_course_citation_keeps_offset(monkeypatch):
     assert "offset=42" in prompt
 
 
+def test_citation_sentence_splitter_merges_bare_markers():
+    """句末独立成行的 [n] 要并入前一句，不能当成空陈述送引用核验。"""
+    from eval_paper_quality import _cited_sentences
+
+    got = _cited_sentences("MinerU 基于 PDF-Extract-Kit。[1][7]")
+    assert got == [("MinerU 基于 PDF-Extract-Kit。 [1][7]", [1, 7])]
+    assert _cited_sentences("一 [1]。二 [2]。") == [("一 [1]。", [1]), ("二 [2]。", [2])]
+    assert _cited_sentences("无引用。") == []
+
+
 if __name__ == "__main__":
     test_paper_citation_fields_and_prompt()
     test_course_citation_keeps_offset()
+    test_citation_sentence_splitter_merges_bare_markers()
     print("PASS test_paper_citation")
