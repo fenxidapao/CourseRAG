@@ -70,8 +70,24 @@ def test_citation_sentence_splitter_merges_bare_markers():
     assert _cited_sentences("无引用。") == []
 
 
+def test_citations_merge_same_page_blocks():
+    """同页已召回块的 block_ids 并入引用；跨页/别的论文不动，rank 与内容不变。"""
+    a = _paper_doc()
+    b = _paper_doc()
+    b.metadata.update({"block_ids": "p0003_b004", "start_index": 30050})
+    c = _paper_doc()
+    c.metadata.update({"block_ids": "p0004_b001", "page": 4, "page_start": 4, "page_end": 4})
+    cites = build_citations([a, b, c])
+    assert [x["rank"] for x in cites] == [1, 2, 3]
+    assert cites[0]["block_ids"] == "p0003_b001,p0003_b004"
+    assert cites[1]["block_ids"] == "p0003_b004,p0003_b001"
+    assert cites[2]["block_ids"] == "p0004_b001"
+    assert cites[0]["content"].startswith("3 Method")
+
+
 if __name__ == "__main__":
     test_paper_citation_fields_and_prompt()
     test_course_citation_keeps_offset()
+    test_citations_merge_same_page_blocks()
     test_citation_sentence_splitter_merges_bare_markers()
     print("PASS test_paper_citation")

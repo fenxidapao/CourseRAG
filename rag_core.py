@@ -1423,6 +1423,10 @@ def build_citations(docs):
 
     分数展示优先级：rerank_score → hybrid_score → vector_score
     （快速模式只有 vector_score；混合未精排时是 hybrid_score；精排后是 rerank_score）。
+
+    v3.3：同页已召回块并入 block_ids。模型常把句子挂到同页的兄弟块（证据在召回集里、
+    只是 [n] 指到隔壁块），页图高亮按块画，就会框不到证据。编号与卡片顺序一概不动，
+    只把「同一 paper_id + page 的本轮召回块」的 block_ids 合并，让高亮覆盖证据。
     """
     citations = []
     for rank, d in enumerate(docs, 1):
@@ -1460,7 +1464,28 @@ def build_citations(docs):
             c["image_path"] = d.metadata.get("image_path")
             c["page"] = d.metadata.get("page")
         citations.append(c)
+    _merge_same_page_blocks(citations)
     return citations
+
+
+def _merge_same_page_blocks(citations):
+    """把同一论文同一页的已召回块 block_ids 合并进该页每条引用（原地改 block_ids）。"""
+    by_page = {}
+    for c in citations:
+        pid, page, ids = c.get("paper_id"), c.get("page"), c.get("block_ids")
+        if not pid or page is None or not ids:
+            continue
+        bucket = by_page.setdefault((pid, page), [])
+        for x in str(ids).split(","):
+            x = x.strip()
+            if x and x not in bucket:
+                bucket.append(x)
+    for c in citations:
+        key = (c.get("paper_id"), c.get("page"))
+        if key in by_page and c.get("block_ids"):
+            own = [x.strip() for x in str(c["block_ids"]).split(",") if x.strip()]
+            merged = own + [x for x in by_page[key] if x not in own]
+            c["block_ids"] = ",".join(merged)
 
 
 def answer_question(question, mode="accurate", custom_prompt=None, history="",
