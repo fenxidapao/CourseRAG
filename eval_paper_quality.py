@@ -70,8 +70,13 @@ def _cited_sentences(answer):
     return out
 
 
-def _judge_support(sentence, chunk):
-    """裁判判一条陈述是否被证据段落支持；异常/解析失败按不支持处理（保守）。"""
+def _judge_support(sentence, chunk, retries=2):
+    """裁判判一条陈述是否被证据段落支持；返回 True / False / None（None=裁判故障）。
+
+    2026-11-02：此前异常/解析失败一律返回 False，把「裁判挂了」混进「不支持」——
+    实测同一批 (句子, 块) 直连裁判 12/12 判支持，但整轮 citecheck 曾记成 0/53。
+    现在失败重试 2 次仍不行就返回 None，由调用方单独统计，不再污染支持率。
+    """
     user = f"""【证据段落】
 {chunk[:3000]}
 
@@ -79,15 +84,18 @@ def _judge_support(sentence, chunk):
 {sentence[:600]}
 
 这条陈述中的事实是否能由【证据段落】直接支持？只输出 JSON：{{"supported": true/false}}"""
-    try:
-        out = llm_provider.judge_chat(
-            [{"role": "system", "content": _CITE_SYS}, {"role": "user", "content": user}],
-            temperature=0.0,
-        )
-    except Exception:
-        return False
-    m = re.search(r'"supported"\s*:\s*(true|false)', out or "", re.I)
-    return bool(m) and m.group(1).lower() == "true"
+    for _ in range(retries + 1):
+        try:
+            out = llm_provider.judge_chat(
+                [{"role": "system", "content": _CITE_SYS}, {"role": "user", "content": user}],
+                temperature=0.0,
+            )
+        except Exception:
+            continue
+        m = re.search(r'"supported"\s*:\s*(true|false)', out or "", re.I)
+        if m:
+            return m.group(1).lower() == "true"
+    return None
 
 
 def _union_text(blocks, metas, n):
@@ -119,21 +127,30 @@ def run_citecheck(gen_csv="", limit=0):
     for r in rows:
         blocks = json.loads(r.get("contexts_json") or "[]")
         metas = json.loads(r.get("cites_json") or "[]")
-        total = supported = union_supported = 0
+        total = supported = union_supported = errors = 0
         detail = []
         for sent, idxs in _cited_sentences(r.get("answer", "")):
             total += 1
-            ok = any(1 <= n <= len(blocks) and _judge_support(sent, blocks[n - 1]) for n in idxs)
-            ok_union = ok or any(
-                1 <= n <= len(blocks) and _judge_support(sent, _union_text(blocks, metas, n))
-                for n in idxs
-            )
+            single_vals, union_vals = [], []
+            for n in idxs:
+                if not (1 <= n <= len(blocks)):
+                    continue
+                v = _judge_support(sent, blocks[n - 1])
+                u = True if v is True else _judge_support(sent, _union_text(blocks, metas, n))
+                single_vals.append(v)
+                union_vals.append(u)
+            ok = any(v is True for v in single_vals)
+            ok_union = any(u is True for u in union_vals)
+            judge_error = bool(single_vals) and all(v is None for v in single_vals)
             supported += int(ok)
             union_supported += int(ok_union)
+            errors += int(judge_error)
             detail.append({"sentence": sent[:120], "cites": idxs,
-                           "supported": ok, "union_supported": ok_union})
+                           "supported": ok, "union_supported": ok_union,
+                           "judge_error": judge_error})
         row = {k: v for k, v in r.items() if k not in ("contexts_json", "cites_json")}
         row["cite_sentences"] = total
+        row["cite_judge_errors"] = errors
         row["cite_supported_frac"] = round(supported / total, 3) if total else None
         row["cite_supported_all"] = int(total > 0 and supported == total)
         row["cite_union_frac"] = round(union_supported / total, 3) if total else None
@@ -141,7 +158,7 @@ def run_citecheck(gen_csv="", limit=0):
         row["cite_detail"] = json.dumps(detail, ensure_ascii=False)
         out_rows.append(row)
         print(f"{r['idx']:>2} sentences={total} supported={supported} "
-              f"union={union_supported} page_hit={r['cite_hit']}", flush=True)
+              f"union={union_supported} judge_err={errors} page_hit={r['cite_hit']}", flush=True)
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     path = gen_csv.replace("_gen.csv", f"_cite_{ts}.csv")
@@ -156,6 +173,7 @@ def run_citecheck(gen_csv="", limit=0):
     uni = sum(round(x["cite_union_frac"] * x["cite_sentences"]) for x in judged)
     all_ok = sum(x["cite_supported_all"] for x in judged)
     all_uni = sum(x["cite_union_all"] for x in judged)
+    errs = sum(x["cite_judge_errors"] for x in judged)
     page_ok = sum(int(x["cite_hit"]) for x in out_rows)
     print(f"\n[csv] {path}")
     print(f"[cite] questions={len(out_rows)} with_citation={len(judged)} "
@@ -164,6 +182,10 @@ def run_citecheck(gen_csv="", limit=0):
           f"single_question_all={all_ok}/{len(judged)}={all_ok/max(1,len(judged)):.3f}")
     print(f"       union_sentence_support={uni}/{sents}={uni/sents:.3f}  "
           f"union_question_all={all_uni}/{len(judged)}={all_uni/max(1,len(judged)):.3f}")
+    if errs:
+        print(f"       ⚠️ judge_errors={errs}/{sents}（裁判返回空/解析失败，已排除在支持率之外）")
+        if errs > 0.1 * max(1, sents):
+            print("       ⚠️ 裁判故障率 >10%，本轮数字不可用，请重跑")
 
 
 def _write_csv(path, rows):
