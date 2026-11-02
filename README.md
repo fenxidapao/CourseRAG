@@ -46,7 +46,7 @@ uvicorn main:app --host 127.0.0.1 --port 8000
 
 # 3) 解析 + 索引（CLI 与 UI/API 等价）
 python paper_ingest.py --dir data/papers/raw --only-new   # MinerU 解析 → normalized
-python paper_index.py --rebuild                            # normalized → 1324 块（18 篇，1200 字切分）
+python paper_index.py --rebuild                            # normalized → 1341 块（18 篇 + 18 条元信息块，1200 字切分）
 python paper_index.py --audit                              # 100% 有页 / 0 跨页
 ```
 
@@ -90,7 +90,7 @@ data/papers/
 MCP 出口：`paper_retrieve`（论文库主入口）、`list_documents`；`course_retrieve` 保留为课程兼容别名。
 Streamlit 侧引用卡直接显示「《标题》第 N 页 · 章节」+ 页图。
 
-### 论文库实测（2026-10-29，18 篇 / 289 页 / 1324 块 / 1200 字切分 / bge-m3 + bge-reranker-v2-m3）
+### 论文库实测（2026-10-29，18 篇 / 289 页 / 1324 块正文 + 18 条元信息块 / 1200 字切分 / bge-m3 + bge-reranker-v2-m3）
 
 - 语料：18 篇开放获取论文（RAG / DPR / FiD / ColBERT / Sentence-BERT / BGE-M3 / HyDE / Self-RAG /
   RAGAS / GraphRAG / Lost in the Middle / RAG 综述 / MinerU / Seven Failure Points / QLoRA 等），
@@ -124,6 +124,10 @@ Streamlit 侧引用卡直接显示「《标题》第 N 页 · 章节」+ 页图�
     仍是同一题，精排 **0.1327**（向量 0.564 过阈）。它不含论文自称缩写，题名路由不覆盖；
     该题问的是作者/期刊这类页面元信息，精排分天然低。
   - 三次均**未达 5% 误拒目标**，且按纪律跑完不回调阈值。
+  - **元信息块修复（2026-11-02）**：`paper_chunker.metadata_chunk()` 每篇生成一条
+    `block_type=metadata` 的短块（标题 / 作者 / 发表期刊 / 年份）。该题精排分 **0.133 → 0.846**，
+    端到端答出「邢淼、田丽，《知识管理论坛》」并引到第 1 页；30 题页级（1.000 / 0.967 / 0.700）
+    与拒答门控（90% / 0%）无变化。**未整组重跑 held-out**（第三次看答案会失去留出意义）。
 - 三阈值（论文库专用，非课程值）：`PAPER_HARD_REJECT_VECTOR_THRESHOLD=0.40`、
   `PAPER_HARD_REJECT_RERANK_THRESHOLD=0.20`、`PAPER_LOW_CONFIDENCE_THRESHOLD=0.50`。
   扩容到 18 篇后仍为 90% / 0%，未重标；上方两道漏拒说明这三个阈值已到顶-1 分数的分辨上限。
@@ -169,7 +173,8 @@ Streamlit 侧引用卡直接显示「《标题》第 N 页 · 章节」+ 页图�
   **`single` 不变差、也不因合并而变好**：它衡量的"归因错误率"仍然存在（模型把句子挂到隔壁块）。
 - 0.633 是**严格下界**（事实在别页重复、命中也不算），不是真实错误率；0.967 说明"引到的那一页确实有答案"。
 
-- 归一化指 MinerU 公式数字拆字修复（`$0 . 9 8$` → `$0.98$`）：数学段内拆字已归零，索引 1324→1323 块。
+- 归一化指 MinerU 公式数字拆字修复（`$0 . 9 8$` → `$0.98$`）：数学段内拆字已归零，索引 1324→1323 块；
+  2026-11-02 加元信息块后为 **1341 块**（1323 正文 + 18 元信息）。
   检索层不受影响：paper_hit@8 1.000 / page_hit@8 1.000 / strict@1 0.867；拒答 90% / 域内误拒 0%。
 - 归一化后三处引用页未中：Q8（LoRA 秩 r，引到第 11 页，期望 10）、Q9（引到第 5 页，期望 1/8），
   外加 Q3 页码虽对、数值仍错（见下）。

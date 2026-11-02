@@ -105,6 +105,102 @@ def _make_chunk(data, page, seq, body, blocks_meta, block_type="text"):
     }
 
 
+def _first_page_text(data):
+    pages = data.get("pages") or []
+    if not pages:
+        return ""
+    return " ".join((b.get("text") or "") for b in (pages[0].get("blocks") or []))
+
+
+def _venue(data):
+    """发表期刊/会议：优先取首页引用格式行（中文期刊），否则 arXiv 编号。"""
+    text = _first_page_text(data)
+    m = re.search(r"\[J/OL\]\.\s*([^,，]+)", text)
+    if m:
+        return re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", m.group(1)).strip()
+    m = re.search(r"arxiv\.org/abs/([\w.\-]+)", data.get("source_url") or "", re.I)
+    if m:
+        return f"arXiv 预印本（arXiv:{m.group(1)}）"
+    return ""
+
+
+def _citation_line(data):
+    pages = data.get("pages") or []
+    if not pages:
+        return ""
+    for b in pages[0].get("blocks") or []:
+        t = (b.get("text") or "").strip()
+        if "引用格式" in t or ("[J" in t and "引用" in t):
+            return t
+    return ""
+
+
+def _authors_from_citation(line):
+    """从「引用格式：邢淼 , 田丽 . 标题…」取全部作者（元数据常只有第一作者）。"""
+    m = re.match(r"^[^：:]*[：:]\s*(.+?)\s*[.。]\s", line or "")
+    if not m:
+        return ""
+    names = re.sub(r"\s*,\s*", "、", m.group(1)).strip()
+    names = re.sub(r"^、|、$", "", names)
+    return names if 0 < len(names) <= 80 else ""
+
+
+def metadata_chunk(data):
+    """每篇一条元信息 chunk：标题/作者/期刊/年份（不拼整条引用格式）。
+
+    为什么单独成块：整页 chunk 对「作者/期刊」这类短问句的 rerank 只有 0.09；
+    短句块实测 0.29~0.85。embed_text 必须与 page_content 一致——竖线串会让
+    reranker 掉到 0.003（2026-11-02 实测）。
+    """
+    title = (data.get("title") or "").strip()
+    if not title:
+        return None
+    citation = _citation_line(data)
+    authors = _authors_from_citation(citation) or (data.get("authors") or "").strip()
+    year = str(data.get("year") or "").strip()
+    venue = _venue(data)
+    parts = [f"论文信息。标题：{title}。"]
+    if authors:
+        parts.append(f"作者：{authors}。")
+    if venue:
+        parts.append(f"发表期刊：{venue}。")
+    if year:
+        parts.append(f"发表年份：{year} 年。")
+    body = "".join(parts)
+
+    pages = data.get("pages") or []
+    blocks = (pages[0].get("blocks") or []) if pages else []
+    anchor = next((b for b in blocks if b.get("type") == "title"), blocks[0] if blocks else {})
+    sha = data.get("sha256", "")
+    seq = 9999
+    return {
+        "text": body,
+        "page_content": body,
+        "embed_text": body,
+        "metadata": {
+            "chunk_uid": _uid(sha, 1, seq, body),
+            "sha256": sha,
+            "paper_id": data.get("paper_id", ""),
+            "paper_title": title,
+            "authors": authors,
+            "year": year,
+            "page_start": 1,
+            "page_end": 1,
+            "page": 1,
+            "section": "论文信息",
+            "section_level": 0,
+            "block_type": "metadata",
+            "parser": data.get("parser", ""),
+            "block_ids": anchor.get("block_id", ""),
+            "n_pages": int(data.get("n_pages", 0)),
+            "chunk_seq": seq,
+            "source": data.get("source_pdf", ""),
+            "start_index": 10000 + seq,
+            "embed_text": body,
+        },
+    }
+
+
 def chunk_paper(data, max_chars=None, min_chars=None):
     """返回 [{text, page_content, embed_text, metadata}]；每页独立，0 跨页。"""
     max_chars = int(max_chars or config.PAPER_CHUNK_MAX_CHARS)

@@ -37,7 +37,18 @@ def load_paper_chunks(paper_id=None):
         data = _load(path)
         for c in paper_chunker.chunk_paper(data):
             docs.append(Document(page_content=c["page_content"], metadata=c["metadata"]))
+        meta_doc = _metadata_doc(data)
+        if meta_doc:
+            docs.append(meta_doc)
     return docs
+
+
+def _metadata_doc(data):
+    """元信息 chunk → Document。构建逻辑在 paper_chunker.metadata_chunk（零依赖可单测）。"""
+    c = paper_chunker.metadata_chunk(data)
+    if not c:
+        return None
+    return Document(page_content=c["page_content"], metadata=c["metadata"])
 
 
 def upsert_paper(paper_id):

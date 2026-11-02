@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from paper_chunker import audit_chunks, chunk_paper, clean_paper_text
+from paper_chunker import audit_chunks, chunk_paper, clean_paper_text, metadata_chunk
 
 
 def _data():
@@ -77,7 +77,34 @@ def test_chunk_uid_stable_and_clean_keeps_latex():
     assert "\x00" not in cleaned and "\\frac{α}{β}" in cleaned
 
 
+def test_metadata_chunk_contract():
+    """元信息块：字段标签进正文、embed_text 与正文一致、锚定首页标题块。
+
+    embed_text 必须等于 page_content：竖线串会让 reranker 从 0.85 掉到 0.003（实测）。
+    """
+    data = {
+        "paper_id": "cn001", "sha256": "a" * 64, "title": "中文摘要对比研究",
+        "authors": "邢淼", "year": 2024, "n_pages": 3,
+        "source_url": "https://www.kmf.ac.cn/p/404/",
+        "pages": [{"page": 1, "blocks": [
+            {"block_id": "p0001_b000", "type": "title", "text": "中文摘要对比研究"},
+            {"block_id": "p0001_b001", "type": "paragraph",
+             "text": "引用格式：邢淼 , 田丽 . 中文摘要对比研究 [J/OL].知 识 管 理 论 坛 , 2024, 9(5): 437-447."},
+        ]}],
+    }
+    c = metadata_chunk(data)
+    assert c["metadata"]["block_type"] == "metadata"
+    assert c["metadata"]["page"] == 1 and c["metadata"]["block_ids"] == "p0001_b000"
+    assert "标题：中文摘要对比研究" in c["page_content"]
+    assert "作者：邢淼、田丽" in c["page_content"]
+    assert "发表期刊：知识管理论坛" in c["page_content"]
+    assert "发表年份：2024 年" in c["page_content"]
+    assert c["embed_text"] == c["page_content"]
+    assert metadata_chunk({"title": ""}) is None
+
+
 if __name__ == "__main__":
     test_chunk_paper_page_contract()
     test_chunk_uid_stable_and_clean_keeps_latex()
+    test_metadata_chunk_contract()
     print("PASS test_paper_chunk")

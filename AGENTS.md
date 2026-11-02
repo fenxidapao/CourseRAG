@@ -12,7 +12,7 @@
 ## 2. 当前权威状态（2026-10-30，v3 定稿）
 
 - 默认 profile：`APP_PROFILE=paper`；集合 `paper_rag`；索引 `./chroma_db_papers`。
-- 论文库：**18 篇 / 289 页 / 2834 块 → 1324 块 chunk**（1200 字切分；2026-10-29 由 3 篇扩容）。
+- 论文库：**18 篇 / 289 页 / 2834 块 → 1341 块 chunk**（1323 正文 + 18 元信息；1200 字切分）。
   `--audit`：缺页 0、跨页 0、缺章节 20（1.5%）。
 - 阈值（论文库专用）：`vec=0.40 / rerank=0.20 / low=0.50`；
   18 篇池下 20 域外 + 20 域内门控：**拒答 90%（18/20）、域内误拒 0%**；
@@ -41,9 +41,14 @@
   **single 不因合并变好**，它衡量模型把句子挂到隔壁块的归因错误率。
   双裁判对照：qwen2.5:7b 当裁判 faith 0.874（明显更宽松）→ 四指标只报趋势。无 `[n]` 答案 0/15、0/30。
 - **公式数字拆字已修**（v3.1 P0）：`normalize_math_spacing()` 只在 `$...$` 内合并 `0 . 9 8` → `0.98`；
-  数学段内拆字 0（1790 段仅 1 处 `$` 跨 `<td>` 误配）；索引 1324→1323 块。
+  数学段内拆字 0（1790 段仅 1 处 `$` 跨 `<td>` 误配）；索引 1324→1323 块，
+  v3.4 加元信息块后 **1341 块**（1323 正文 + 18 元信息）。
   但 **Q3 仍不稳定**（2026-11-02 轮又答 0.999；2026-10-31 轮答对 0.98）：7B 会忽略排在最前的短块；
   把首块移到末尾 Q3 3/3 答对，全量 cite 却 0.867→0.733 → 不改顺序。
+- **元信息块**（v3.4）：`paper_chunker.metadata_chunk()` 每篇一条 `block_type=metadata`
+  短块（标题/作者/期刊/年份）。held-out 的「中文论文作者与期刊」题 rerank 0.133 → **0.846**，
+  端到端答对并引到第 1 页；30 题页级与 20+20 门控无变化。embed_text 必须等于正文
+  （竖线串会让 rerank 从 0.85 掉到 0.003）。
 - 本地模型（v3 定稿）：生成 `LLM_PROVIDER=ollama` / `LLM_MODEL=qwen2.5:7b`（稳态 8.2 s/题，峰值 7737/8188 MiB）；
   裁判 `JUDGE_PROVIDER=local` / `JUDGE_MODEL=glm4:9b`，但 **paper 下 `GROUNDED_VERIFY_ENABLED` 默认 false**
   （8 GB 卡上 7B 生成 + 9B 裁判无法同驻）；关的只是"生成后复核"，检索前硬拒答阈值照常生效，
@@ -59,9 +64,9 @@
   `.env` 里 `MINERU_PYTHON=E:/mineru_venv/Scripts/python.exe`；模型源默认 modelscope。
 - 课程版：tag `v1.1-course-final` / 分支 `archive/course-v1.1`；课程索引 `chroma_db_m3` 未动。
 - 测试：`test_paper_normalize / test_paper_chunk / test_paper_citation / test_paper_routing / test_api_papers / test_config_profile` 已入 CI；
-  离线全量 **171 passed**（不含需 Ollama + 索引的 `test_retrieval.py`）。
-  注意 `test_api.py` 依赖 import 时 `APP_PROFILE=course`：**必须让它先于 paper 套件收集**
-  （CI 里 `test_api.py test_api_papers.py` 的顺序），否则 config 先以 paper 导入，4 条上传/删除用例会假失败。
+  离线全量 **172 passed**（不含需 Ollama + 索引的 `test_retrieval.py`）。
+  `conftest.py` 在收集前固定 `APP_PROFILE=course`，所以**裸跑 `pytest` 不再因收集顺序假失败**
+  （论文套件在 fixture 里 monkeypatch profile）。CI 仍按 `test_api.py test_api_papers.py` 的顺序分文件跑。
 - 断点与恢复指引：仓库外 `CourseRAG-实现记录.md` 末尾「断点」节（先读它）。
 
 ## 2.1 未完成（恢复后从这里开始）
@@ -72,8 +77,11 @@
   （`PAPER_TITLE_ROUTING_ENABLED`，含 `test_paper_routing.py`）、README/AGENTS 口径同步。
 - v3.3 已完成：同页兄弟块并入引用（`build_citations` → `_merge_same_page_blocks`，编号不动）、
   citecheck 双口径（single/union）、30 题四指标、路由后 held-out 一次。
-- 仍未闭：云端裁判 key 401（带接地的 UI 验收待重跑）；held-out 域内误拒 10%（1/10）未达 5%；
-  Q3 数值不稳定；v3.3 改动未 push。
+- v3.4 已完成：元信息块（`paper_chunker.metadata_chunk`，18 条）、held-out 元信息单题复测通过、
+  `conftest.py` 修复裸跑 pytest 的收集顺序问题。
+- 仍未闭：held-out 整组仍按 **域内误拒 10%（1/10）** 记录（元信息题已单题修好，未整组重跑，
+  避免第三次看答案）；Q3 数值不稳定（生成层）；接地门 paper 默认关，带接地的 UI 验收需显式开启 + `glm4:9b`。
+- 推送：v3.3 三个 commit 与 v3.4 一并推到 `origin/feat/paper-mineru`（以 `git log` 为准）。
 - 历史（已完成，留档）：M5 的 qwen3:4b/llama3.1:8b 读数已被 v3 的 qwen2.5:7b 方案取代；
   `qwen3:8b` 未下载（用户决定不急），8B 档延迟/显存 UNVERIFIED。
   M6 的解析抽检 15/15、MCP paper e2e、CI、Docker slim 981 MB `/health` 200 均已完成。
