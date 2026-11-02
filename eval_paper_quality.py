@@ -90,6 +90,19 @@ def _judge_support(sentence, chunk):
     return bool(m) and m.group(1).lower() == "true"
 
 
+def _union_text(blocks, metas, n):
+    """第 n 条引用所在页的「本轮召回块」合并文本（v3.3 高亮范围口径）。"""
+    if not metas or not (1 <= n <= len(metas)):
+        return blocks[n - 1] if 1 <= n <= len(blocks) else ""
+    tgt = metas[n - 1]
+    same = [
+        i for i, m in enumerate(metas, 1)
+        if i <= len(blocks) and m.get("paper_id") == tgt.get("paper_id")
+        and m.get("page") == tgt.get("page")
+    ] or [n]
+    return "\n\n".join(blocks[i - 1] for i in same)
+
+
 def run_citecheck(gen_csv="", limit=0):
     if not gen_csv:
         cands = sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -105,21 +118,30 @@ def run_citecheck(gen_csv="", limit=0):
     out_rows = []
     for r in rows:
         blocks = json.loads(r.get("contexts_json") or "[]")
-        total = supported = 0
+        metas = json.loads(r.get("cites_json") or "[]")
+        total = supported = union_supported = 0
         detail = []
         for sent, idxs in _cited_sentences(r.get("answer", "")):
             total += 1
             ok = any(1 <= n <= len(blocks) and _judge_support(sent, blocks[n - 1]) for n in idxs)
+            ok_union = ok or any(
+                1 <= n <= len(blocks) and _judge_support(sent, _union_text(blocks, metas, n))
+                for n in idxs
+            )
             supported += int(ok)
-            detail.append({"sentence": sent[:120], "cites": idxs, "supported": ok})
-        row = {k: v for k, v in r.items() if k != "contexts_json"}
+            union_supported += int(ok_union)
+            detail.append({"sentence": sent[:120], "cites": idxs,
+                           "supported": ok, "union_supported": ok_union})
+        row = {k: v for k, v in r.items() if k not in ("contexts_json", "cites_json")}
         row["cite_sentences"] = total
         row["cite_supported_frac"] = round(supported / total, 3) if total else None
         row["cite_supported_all"] = int(total > 0 and supported == total)
+        row["cite_union_frac"] = round(union_supported / total, 3) if total else None
+        row["cite_union_all"] = int(total > 0 and union_supported == total)
         row["cite_detail"] = json.dumps(detail, ensure_ascii=False)
         out_rows.append(row)
         print(f"{r['idx']:>2} sentences={total} supported={supported} "
-              f"page_hit={r['cite_hit']}", flush=True)
+              f"union={union_supported} page_hit={r['cite_hit']}", flush=True)
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     path = gen_csv.replace("_gen.csv", f"_cite_{ts}.csv")
@@ -131,13 +153,17 @@ def run_citecheck(gen_csv="", limit=0):
     judged = [x for x in out_rows if x["cite_sentences"]]
     sents = sum(x["cite_sentences"] for x in judged)
     sup = sum(round(x["cite_supported_frac"] * x["cite_sentences"]) for x in judged)
+    uni = sum(round(x["cite_union_frac"] * x["cite_sentences"]) for x in judged)
     all_ok = sum(x["cite_supported_all"] for x in judged)
+    all_uni = sum(x["cite_union_all"] for x in judged)
     page_ok = sum(int(x["cite_hit"]) for x in out_rows)
     print(f"\n[csv] {path}")
     print(f"[cite] questions={len(out_rows)} with_citation={len(judged)} "
           f"page_strict={page_ok}/{len(out_rows)}={page_ok/len(out_rows):.3f}")
-    print(f"       sentence_support={sup}/{sents}={sup/sents:.3f}  "
-          f"question_all_supported={all_ok}/{len(judged)}={all_ok/max(1,len(judged)):.3f}")
+    print(f"       single_sentence_support={sup}/{sents}={sup/sents:.3f}  "
+          f"single_question_all={all_ok}/{len(judged)}={all_ok/max(1,len(judged)):.3f}")
+    print(f"       union_sentence_support={uni}/{sents}={uni/sents:.3f}  "
+          f"union_question_all={all_uni}/{len(judged)}={all_uni/max(1,len(judged)):.3f}")
 
 
 def _write_csv(path, rows):
@@ -162,6 +188,11 @@ def run_generate(limit=0, cases_mode="base"):
         used = used_pages(answer, cites)
         hit = int(bool(set(used) & set(c["expected_pages"])))
         blocks = [d.page_content for d in (res.get("docs") or [])]
+        cite_meta = [
+            {"paper_id": x.get("paper_id"), "page": x.get("page"),
+             "block_ids": x.get("block_ids") or ""}
+            for x in (res.get("citations") or [])
+        ]
         rows.append({
             "idx": i,
             "paper_id": c["paper_id"],
@@ -174,6 +205,7 @@ def run_generate(limit=0, cases_mode="base"):
             "latency_s": latency,
             "answer": answer[:2000],
             "contexts_json": json.dumps(blocks, ensure_ascii=False),
+            "cites_json": json.dumps(cite_meta, ensure_ascii=False),
         })
         print(f"{i:02d} cite_hit={hit} used={rows[-1]['used_pages'] or '-'} "
               f"want={rows[-1]['expected_pages']} rejected={rows[-1]['rejected']} {latency}s",
@@ -255,7 +287,7 @@ def main():
     ap.add_argument("--gen-csv", default="", help="judge 阶段指定输入 CSV（默认取最新）")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 题（冒烟用）")
     ap.add_argument("--cases", default="base", choices=["base", "all"],
-                    help="base=原 15 题四指标；all=30 题只看引用页")
+                    help="generate 用：base=原 15 题，all=30 题；judge/citecheck 按输入 CSV 行数跑")
     args = ap.parse_args()
     if args.stage == "generate":
         run_generate(args.limit, args.cases)
