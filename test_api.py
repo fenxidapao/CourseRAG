@@ -79,13 +79,30 @@ def client(monkeypatch, tmp_path):
 
 # ==================== meta / health ====================
 def test_service_info(client):
-    r = client.get("/")
+    # 有 frontend/dist 时 "/" 让给 React 单页，服务信息固定走 /api-info
+    r = client.get("/api-info")
     assert r.status_code == 200
     body = r.json()
     assert body["name"] == "CourseRAG API"
     assert any("/health" in e for e in body["endpoints"])
     assert any("/query" in e for e in body["endpoints"])
     assert "models" in body
+
+
+def test_api_prefix_alias(client):
+    """/api/* 去掉前缀后与裸路径等价（生产构建前端 BASE='/api'）。"""
+    r = client.get("/api/health")
+    assert r.status_code == 200 and r.json()["ok"] is True
+
+
+def test_root_is_spa_or_service_info(client):
+    """dist 存在 → HTML；未构建前端 → 旧的服务信息 JSON。两种部署都允许。"""
+    r = client.get("/")
+    assert r.status_code == 200
+    if "text/html" in r.headers.get("content-type", ""):
+        assert "<div id=\"root\">" in r.text
+    else:
+        assert r.json()["name"] == "CourseRAG API"
 
 
 def test_health(client):

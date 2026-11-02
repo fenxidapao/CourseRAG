@@ -97,7 +97,7 @@ export default function Chat() {
               {m.citations.map((c) => (
                 <Link
                   key={c.rank}
-                  to={`/papers/${c.paper_id}?page=${c.page}&blocks=${c.block_ids ?? ''}`}
+                  to={`/paper/${c.paper_id}?page=${c.page}&blocks=${c.block_ids ?? ''}`}
                 >
                   <Space size={6} wrap>
                     <Tag>#{c.rank}</Tag>

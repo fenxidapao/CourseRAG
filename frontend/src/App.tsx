@@ -29,7 +29,7 @@ export default function App() {
       <Content style={{ padding: 24, maxWidth: 1280, width: '100%', margin: '0 auto' }}>
         <Routes>
           <Route path="/" element={<Library />} />
-          <Route path="/papers/:id" element={<PaperDetail />} />
+          <Route path="/paper/:id" element={<PaperDetail />} />
           <Route path="/chat" element={<Chat />} />
         </Routes>
       </Content>

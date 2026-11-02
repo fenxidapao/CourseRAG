@@ -70,7 +70,7 @@ export default function Library() {
             title: '论文',
             render: (_, p) => (
               <Space direction="vertical" size={0}>
-                <Link to={`/papers/${p.paper_id}`}>{p.title || p.filename}</Link>
+                <Link to={`/paper/${p.paper_id}`}>{p.title || p.filename}</Link>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                   {p.filename}
                 </Typography.Text>

@@ -169,9 +169,20 @@ app.add_middleware(
 # Gate 2：按 IP 限流（RATE_LIMIT=0 时为 no-op）。多副本需换 Redis（文档路线 β/ε）。
 app.add_middleware(RateLimitMiddleware, per_minute=config.RATE_LIMIT)
 
+# ---------- /api 前缀（生产构建走同源，前端 BASE='/api'） ----------
+# 开发模式由 Vite proxy 负责 rewrite；这里让 `npm run build` 后同源访问也能工作。
+# 只改写 /api/ 开头的路径，/docs、/health 等不受影响。
+@app.middleware("http")
+async def _strip_api_prefix(request, call_next):
+    if request.scope.get("path", "").startswith("/api/"):
+        request.scope["path"] = request.scope["path"][4:]
+        request.scope["raw_path"] = request.scope["path"].encode()
+    return await call_next(request)
+
+
 
 # ==================== 服务信息 ====================
-@app.get("/", tags=["meta"])
+@app.get("/api-info", tags=["meta"])
 def service_info():
     """服务元信息（端点一览）。"""
     return {
@@ -860,3 +871,36 @@ def get_image(rel_path: str):
     if not target.is_file():
         raise HTTPException(status_code=404, detail=f"图片不存在: {rel_path!r}")
     return FileResponse(target)
+
+# ---------- React 前端静态托管（生产） ----------
+# 开发模式走 Vite proxy（/api → 127.0.0.1:8000）；这里只在 `frontend/dist` 存在时挂载，
+# 缺失时静默跳过，不影响 FastAPI / Streamlit / MCP 三个出口。
+_FRONTEND_DIST = (Path(__file__).resolve().parent / "frontend" / "dist").resolve()
+if _FRONTEND_DIST.is_dir():
+    from fastapi.staticfiles import StaticFiles
+
+    # API 顶层前缀：这些路径下的未知请求必须 404，不能落到 SPA 兜底
+    _API_TOP = {
+        "api-info", "health", "query", "retrieve", "documents",
+        "papers", "index", "images", "docs", "openapi.json", "redoc",
+    }
+
+    app.mount(
+        "/assets",
+        StaticFiles(directory=_FRONTEND_DIST / "assets"),
+        name="frontend-assets",
+    )
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def _frontend_spa(full_path: str):
+        """SPA 兜底：静态文件命中就返回文件，否则交回 index.html 由前端路由接管。
+
+        注册在所有 API 路由之后；API 前缀下的未知路径仍返回 404，
+        不要被前端兜底吞成 200（否则 /papers/../etc 这类请求看起来像成功）。
+        """
+        if full_path.split("/", 1)[0] in _API_TOP:
+            raise HTTPException(status_code=404, detail="Not Found")
+        target = (_FRONTEND_DIST / full_path).resolve()
+        if full_path and _FRONTEND_DIST in target.parents and target.is_file():
+            return FileResponse(target)
+        return FileResponse(_FRONTEND_DIST / "index.html")

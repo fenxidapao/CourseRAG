@@ -56,9 +56,18 @@ React 前端（可选，Streamlit 已覆盖同一链路）：
 cd frontend
 npm install
 npm run dev          # http://127.0.0.1:5173，/api 代理到 127.0.0.1:8000
+npm run build        # 生产构建 → frontend/dist，由 FastAPI 直接托管
 ```
 
+生产模式（`frontend/dist` 存在时自动生效，无需额外配置）：
+
+- `GET /` → React 单页（服务信息移到 `/api-info`，`/docs` 仍是 Swagger）；
+- `GET /api/*` → 去掉 `/api` 前缀后走同一套路由（`/api/papers` ≡ `/papers`）；
+- 详情页路由改为 **`/paper/:id`**（避开与 API `/papers/{id}` 同路径）；
+- 无 `dist` 时行为与旧版一致（`/` 返回服务信息 JSON）。
+
 聊天接口流式走 POST + `fetch`/`ReadableStream`（不用 `EventSource`，因其不支持自定义请求体与请求头）。
+演示流程（预热、三条问句、兜底话术）见 [`DEMO.md`](DEMO.md)。
 
 ### 目录与数据边界
 
