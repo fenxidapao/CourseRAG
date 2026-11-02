@@ -21,23 +21,28 @@
   两道漏拒（BERT MLM 0.702/0.740、Mamba 0.478/0.341）与域内最低分重叠，阈值不可分，需接地判官。
   负样本已按扩容重标（RAG / Llama 2 MMLU 变域内 → 换 DoRA / KTO），旧 95% 与新 90% 非同题集，不可比。
   held-out 10+10：800 切分（3 篇）域外 100%、**域内误拒 20%**；
-  1200 切分（18 篇，2026-10-30 只跑一次）域外 **100%**、域内误拒 **10%（1/10，论文作者/期刊题被精排 0.133 拦下）**
+  1200 切分（18 篇）域外 **100%**、域内误拒 **10%（1/10，论文作者/期刊题被精排 0.133 拦下）**；
+  路由后再跑一次（2026-11-02）仍是同一题、精排 **0.1327**（向量 0.564 过阈；题名路由不覆盖元信息题）
   → 仍未达 5% 目标，按纪律不回调阈值。
 - 页级评测（**30 题覆盖 18 篇**，2026-10-30 扩题）：paper_hit@8 **1.000（30/30）** / page_hit@8 **0.967（29/30）** /
   page_strict@1 **0.700（21/30）**；原 15 题子集仍是 1.000 / 1.000 / 0.867——**15 题口径偏乐观，对外用 30 题**。
   路由前同题集是 0.967 / 0.900 / 0.700（`PAPER_TITLE_ROUTING_ENABLED=false` 可复现），路由只修正了 HyDE/FiD 两题。
-- 回答质量（2026-10-30，qwen2.5:7b 生成 / glm4:9b 裁判）：15 题归一化后 faith 0.603 / prec 0.801 / recall 0.633 /
-  cite 0.867；**30 题引用三种口径（v3.2，2026-10-31）**：
-  - `cite_page_strict`（[n] 命中人工登记的首次出现页）**0.600（18/30）**；
-  - `cite_page_support`（被引页本身含证据，关键词核验）**0.967（29/30）**，只有 GraphRAG 一题被引页不含结论；
-  - `cite_supported`（被引 **chunk** 是否支持该句，glm4:9b）**0.538 句级（28/52）/ 0.500 整题（15/30）**；
-    人工复核 24 条被判不支持的句子：5 条判官假阴性（表格/多断言）、1 条无实质陈述、6 条部分支持，
-    修正后 **0.647 句级（33/51）/ 0.600 整题（18/30）**。
-  **三种口径不能互相替代**：页对≠块对，约 1/3 带引用的答案点了正确页、但 chunk 里没有该事实。
+- 回答质量（**30 题全套，2026-11-02**，qwen2.5:7b 生成 / glm4:9b 裁判，0 题硬拒）：
+  faith **0.763** / rel 1.000（无判别力）/ prec **0.836** / recall **0.667** / `answer_cite_page_acc` **0.633（19/30）**；
+  15 题子集仍为 0.603 / 1.000 / 0.801 / 0.633 / 0.867——**不同题集，不横向比趋势**。
+  引用四口径（同一批 30 题）：
+  - `cite_page_strict`（[n] 命中人工登记的首次出现页）**0.633（19/30）**；
+  - `cite_page_support`（被引页本身含证据，关键词核验）**0.967（29/30）**；
+  - `cite_supported_single`（被引 chunk 是否支持该句，glm4:9b）**0.612 句级（30/49）/ 0.467 整题（14/30）**；
+  - `cite_supported_union`（同页本轮召回块合并后）**0.735（36/49）/ 0.667（20/30）**；
+    人工复核 13 条 union 也不支持的句子（3 条判官假阴性、3 条部分支持、1 条无实质、6 条真不支持）后：
+    single **0.688/0.567**、union **0.813/0.767**。
+  v3.3 起 `build_citations` 把同论文同页已召回块的 block_ids 并入引用（编号不动），页图高亮覆盖同页证据；
+  **single 不因合并变好**，它衡量模型把句子挂到隔壁块的归因错误率。
   双裁判对照：qwen2.5:7b 当裁判 faith 0.874（明显更宽松）→ 四指标只报趋势。无 `[n]` 答案 0/15、0/30。
 - **公式数字拆字已修**（v3.1 P0）：`normalize_math_spacing()` 只在 `$...$` 内合并 `0 . 9 8` → `0.98`；
   数学段内拆字 0（1790 段仅 1 处 `$` 跨 `<td>` 误配）；索引 1324→1323 块。
-  但 **Q3 仍不稳定**（2026-10-31 路由轮答对 0.98；此前多轮答 0.999）：7B 会忽略排在最前的短块；
+  但 **Q3 仍不稳定**（2026-11-02 轮又答 0.999；2026-10-31 轮答对 0.98）：7B 会忽略排在最前的短块；
   把首块移到末尾 Q3 3/3 答对，全量 cite 却 0.867→0.733 → 不改顺序。
 - 本地模型（v3 定稿）：生成 `LLM_PROVIDER=ollama` / `LLM_MODEL=qwen2.5:7b`（稳态 8.2 s/题，峰值 7737/8188 MiB）；
   裁判 `JUDGE_PROVIDER=local` / `JUDGE_MODEL=glm4:9b`，但 **paper 下 `GROUNDED_VERIFY_ENABLED` 默认 false**
@@ -54,7 +59,7 @@
   `.env` 里 `MINERU_PYTHON=E:/mineru_venv/Scripts/python.exe`；模型源默认 modelscope。
 - 课程版：tag `v1.1-course-final` / 分支 `archive/course-v1.1`；课程索引 `chroma_db_m3` 未动。
 - 测试：`test_paper_normalize / test_paper_chunk / test_paper_citation / test_paper_routing / test_api_papers / test_config_profile` 已入 CI；
-  离线全量 **170 passed**（不含需 Ollama + 索引的 `test_retrieval.py`）。
+  离线全量 **171 passed**（不含需 Ollama + 索引的 `test_retrieval.py`）。
   注意 `test_api.py` 依赖 import 时 `APP_PROFILE=course`：**必须让它先于 paper 套件收集**
   （CI 里 `test_api.py test_api_papers.py` 的顺序），否则 config 先以 paper 导入，4 条上传/删除用例会假失败。
 - 断点与恢复指引：仓库外 `CourseRAG-实现记录.md` 末尾「断点」节（先读它）。
@@ -65,8 +70,10 @@
 - v3.1 已完成：公式数字归一化、裁判假阴性定性、题集 15→30、四指标与引用页重跑。
 - v3.2 已完成：引用第二口径（`--stage citecheck`，三种口径见 §2）、题名路由
   （`PAPER_TITLE_ROUTING_ENABLED`，含 `test_paper_routing.py`）、README/AGENTS 口径同步。
-- 仍未闭：云端裁判 key 401（带接地的 UI 验收待重跑）；held-out 域内误拒 10%（1200 切分，只跑一次）未达 5% 目标；
-  30 题四指标尚未跑（目前只有 15 题口径）；push 需用户点头。
+- v3.3 已完成：同页兄弟块并入引用（`build_citations` → `_merge_same_page_blocks`，编号不动）、
+  citecheck 双口径（single/union）、30 题四指标、路由后 held-out 一次。
+- 仍未闭：云端裁判 key 401（带接地的 UI 验收待重跑）；held-out 域内误拒 10%（1/10）未达 5%；
+  Q3 数值不稳定；v3.3 改动未 push。
 - 历史（已完成，留档）：M5 的 qwen3:4b/llama3.1:8b 读数已被 v3 的 qwen2.5:7b 方案取代；
   `qwen3:8b` 未下载（用户决定不急），8B 档延迟/显存 UNVERIFIED。
   M6 的解析抽检 15/15、MCP paper e2e、CI、Docker slim 981 MB `/health` 200 均已完成。
