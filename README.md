@@ -1,9 +1,19 @@
-# CourseRAG · 论文库问答（v2.1）
+# CourseRAG · 论文库问答（v3.5）
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688?logo=fastapi&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.61-FF4B4B?logo=streamlit&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)
+
+> **文档导航（新窗口先看）**
+> - 当前状态 / 命令 / 坑：`AGENTS.md`
+> - 5 分钟演示：`DEMO.md`
+> - 历史证据与断点：仓库外 `../CourseRAG-实现记录.md`（文首「当前状态」）
+> - 旧计划 / 旧交接（只看历史，不当口径）：`../CourseRAG-文档归档-2026-11-02/`
+>
+> 论文库（当前）说明从「论文库模式」小节开始；从「这是什么问题」小节起为
+> **课程版 v1.1（已归档）**，论文库读者可跳过。
+
 
 一个垂直领域 RAG 问答应用，面向「计算机／数学专业课、课本知识问答」场景：
 把课程笔记与教材 PDF/PPTX 建成知识库，提问时给出**带来源引用**的回答，答案可回溯到具体段落与教材原图。
@@ -22,7 +32,7 @@ RAG 核心（切分 / 加载 / 嵌入 / 向量检索 / 词面检索 / 融合 / �
 RAG 核心链路直接依赖仅 `ollama` + `chromadb` + `sentence-transformers` 三项，已彻底移除 LangChain 全家桶
 （完整运行依赖见 `requirements.txt`，共 10 项直接依赖）。
 
-## 论文库模式（v2.1，默认 `APP_PROFILE=paper`）
+## 论文库模式（默认 `APP_PROFILE=paper`）
 
 把「课程笔记 RAG」改成「论文库 RAG」：MinerU 解析 PDF → 页/块结构 → 页内切分 → 索引，
 回答与引用**精确到《论文名》第 N 页**，点引用可看该页渲染图并高亮原文块。
@@ -271,6 +281,10 @@ Streamlit 侧引用卡直接显示「《标题》第 N 页 · 章节」+ 页图�
   开门时裁判给 0.33 并替换成拒答，关门后错答会直接返回。裁判同文判定不稳定（跨轮精度约 50%），
   所以只做可选开关、不做默认硬门控。需要"宁可拒答也别答错"的场景，请显式 `GROUNDED_VERIFY_ENABLED=true`。
 - 云端裁判 key 401 时改用 `JUDGE_PROVIDER=local`；paper 下 `GROUNDED_VERIFY_ENABLED=false` 是默认，不是排障开关。
+
+---
+
+> **以下为课程版 v1.1（已归档）说明；论文库读者可跳过。**
 
 ## 这是什么问题
 
