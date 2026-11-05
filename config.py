@@ -232,6 +232,16 @@ PAPER_FALLBACK_ENABLED = os.getenv("PAPER_FALLBACK_ENABLED", "false").lower() ==
 PAPER_TITLE_ROUTING_ENABLED = (
     os.getenv("PAPER_TITLE_ROUTING_ENABLED", "true").lower() == "true"
 )
+# 证据前置（D2，2026-11-05，默认关）：先让同一个 7B 只挑「真正含答案的段落编号」，
+# 再把编号作为提示注入正式 prompt。**不重排 context、不改 [n] 编号、不动 build_citations**
+# ——否则 cite_page_strict（当前语料 0.600）失去可比性，改前/改后 A/B 作废。
+# 只在 paper profile 下生效；解析失败/空集一律回退现有单段链路并计入降级率
+# （观测口 rag_core.evidence_first_stats()）。
+PAPER_EVIDENCE_FIRST_ENABLED = (
+    os.getenv("PAPER_EVIDENCE_FIRST_ENABLED", "false").lower() == "true"
+)
+# 证据预选最多要模型挑几段（默认 8 = RERANKER_TOP_N，即全部进 LLM 的块）。
+PAPER_EVIDENCE_FIRST_MAX_BLOCKS = int(os.getenv("PAPER_EVIDENCE_FIRST_MAX_BLOCKS", "8"))
 # 批量上传/CLI 的 MinerU 并发上限：默认 1，避免 10 个文件同时起进程
 PARSE_CONCURRENCY = max(1, int(os.getenv("PARSE_CONCURRENCY", "1")))
 CITATION_LABEL_MODE = os.getenv(

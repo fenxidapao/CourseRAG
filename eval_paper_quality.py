@@ -195,7 +195,7 @@ def _write_csv(path, rows):
         w.writerows(rows)
 
 
-def run_generate(limit=0, cases_mode="base"):
+def run_generate(limit=0, cases_mode="base", tag=""):
     base = PAGE_CASES_ALL if cases_mode == "all" else PAGE_CASES
     cases = base[:limit] if limit else base
     rows = []
@@ -234,12 +234,21 @@ def run_generate(limit=0, cases_mode="base"):
               flush=True)
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    # D2：同一配置要跑多次取中位，文件名必须带标记——citecheck/judge 的 glob
+    # 取「最新一份 *_gen.csv」，不带标记会把不同配置的批次串在一起。
+    tag_part = ("_" + tag.strip().replace(" ", "_")) if tag.strip() else ""
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        f"eval_results_paper_quality_{ts}_gen.csv")
+                        f"eval_results_paper_quality_{ts}{tag_part}_gen.csv")
     _write_csv(path, rows)
     print(f"\n[csv] {path}")
     print(f"[gen] n={len(rows)} cite_page_acc={sum(r['cite_hit'] for r in rows)/len(rows):.3f} "
           f"rejected={sum(r['rejected'] for r in rows)}")
+    # D2 判据 S2：JSON 降级率 ≤10%；开关关时 runs=0，本行不打印。
+    stats = rag_core.evidence_first_stats()
+    if stats["runs"]:
+        rate = stats["degraded"] / stats["runs"]
+        print(f"[evidence_first] runs={stats['runs']} ok={stats['picked']} "
+              f"degraded={stats['degraded']} degrade_rate={rate:.3f}")
     return path
 
 
@@ -310,9 +319,11 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 题（冒烟用）")
     ap.add_argument("--cases", default="base", choices=["base", "all"],
                     help="generate 用：base=原 15 题，all=30 题；judge/citecheck 按输入 CSV 行数跑")
+    ap.add_argument("--tag", default="",
+                    help="generate 用：文件名标记（如 evidence_first_run1），便于多跑次分档")
     args = ap.parse_args()
     if args.stage == "generate":
-        run_generate(args.limit, args.cases)
+        run_generate(args.limit, args.cases, args.tag)
     elif args.stage == "citecheck":
         run_citecheck(args.gen_csv, args.limit)
     else:

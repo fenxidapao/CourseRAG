@@ -1274,6 +1274,117 @@ def _block_header(i, d):
     return head + "\n"
 
 
+# ====================== 3.6 证据前置（D2，2026-11-05） ======================
+# 动机：当前语料 cite_supported_single 36/56=0.643 明显低于 union 41/56=0.732，
+# 差的 5 句是「模型把句子挂到隔壁块/别的页」，不是检索缺口（D1 抽检 8/8 证据都在上下文里）。
+# 做法：先让同一个 7B 只挑证据段编号，再把编号作为提示注入正式 prompt。
+# 硬约束：不重排 context、不改 [n] 编号、不动 build_citations——否则
+# cite_page_strict（0.600）失去可比性，A/B 作废。
+_EVIDENCE_FIRST_SYSTEM = (
+    "你是论文库问答的证据挑选器。给定一个问题与若干带编号的段落，"
+    "只找出确实包含回答该问题所需事实的段落编号。\n"
+    "规则：\n"
+    "1. 只输出一个 JSON 对象，形如 {\"evidence\":[1,3]}；不要解释、不要代码块、不要额外文字；\n"
+    "2. 编号必须是给定段落的 [n]，不得编造；最多选 %d 个，按编号升序；\n"
+    "3. 若没有任何段落包含所需事实，输出 {\"evidence\":[]}；\n"
+    "4. 只依据段落内容判断，不要使用外部知识。"
+)
+
+_EVIDENCE_FIRST_STATS = {"runs": 0, "degraded": 0, "picked": 0,
+                         "picks": [], "last_raw_head": ""}
+
+
+def evidence_first_stats():
+    """D2 观测口：证据前置的执行/降级计数（评测阶段读它算降级率）。"""
+    return dict(_EVIDENCE_FIRST_STATS)
+
+
+def _parse_evidence(text, n_docs):
+    """从模型输出抽 evidence 编号：先按 evidence 键，再退化到含 evidence 的 JSON 对象。
+
+    只接受 1..n_docs 的整数；空/越界/解析失败一律返回 []（= 降级，调用方回退单段）。
+    """
+    import json as _json
+
+    cands = []
+    m = re.search(r'"evidence"\s*:\s*\[([^\]]*)\]', text or "")
+    if m:
+        cands = re.findall(r"\d+", m.group(1))
+    else:
+        for obj in re.findall(r"\{[^{}]*\}", text or ""):
+            try:
+                data = _json.loads(obj)
+            except Exception:
+                continue
+            if isinstance(data, dict) and isinstance(data.get("evidence"), list):
+                cands = [str(x) for x in data["evidence"]]
+                break
+    out = []
+    for x in cands:
+        try:
+            i = int(x)
+        except Exception:
+            continue
+        if 1 <= i <= n_docs and i not in out:
+            out.append(i)
+    return sorted(out)
+
+
+def select_evidence_blocks(question, docs):
+    """证据前置第一步：让同一个 7B 挑出真正含答案的段落编号。
+
+    返回 (indices, ok)：
+      ok=True  → indices 为 1 基下标（非空、去重升序），调用方据此注入提示；
+      ok=False → 未执行（开关关 / 非 paper / 无 docs）或解析失败 / 空集，
+                 调用方必须回退现有单段链路，并计入降级率。
+
+    任何异常都吞掉——证据前置是增强项，不能成为问答链路的新故障点。
+    """
+    if not config.PAPER_EVIDENCE_FIRST_ENABLED:
+        return [], False
+    if config.APP_PROFILE != "paper" or not docs:
+        return [], False
+    limit = max(1, int(config.PAPER_EVIDENCE_FIRST_MAX_BLOCKS))
+    # D2 诊断修正（2026-11-05 冒烟）：原先只喂每块前 600 字，而 1200 字切分下事实常落在
+    # 后半段（Q3 的 `Adam, β1=0.9, β2=0.98` 就在中后部）→ picker 看不见就漏选/错选，
+    # 再拿错选编号去「优先依据」，等于把生成往错块上推（冒烟 Q3 因此答成错篇）。
+    # 现改为整块输入（块长上界 1200，8 块约 9.6k 字符，需 OLLAMA_NUM_CTX=8192），
+    # 总长兜底 12000 字符，避免异常长块撑爆上下文。
+    parts, used = [], 0
+    for i, d in enumerate(docs, 1):
+        seg = _block_header(i, d) + (d.page_content or "")
+        if used + len(seg) > 12000:
+            seg = seg[: max(0, 12000 - used)]
+            if seg:
+                parts.append(seg)
+            break
+        parts.append(seg)
+        used += len(seg)
+    blocks = "\n\n".join(parts)
+    prompt = (
+        (_EVIDENCE_FIRST_SYSTEM % limit)
+        + "\n\n【问题】\n" + str(question)
+        + "\n\n【段落】\n" + blocks
+        + "\n\n输出 JSON："
+    )
+    _EVIDENCE_FIRST_STATS["runs"] += 1
+    try:
+        raw = ollama_chat([{"role": "user", "content": prompt}], temperature=0.0)
+    except Exception:
+        _EVIDENCE_FIRST_STATS["degraded"] += 1
+        return [], False
+    raw_text = str(raw or "")
+    picked = _parse_evidence(raw_text, len(docs))
+    # 诊断留痕：评测/冒烟直接读 stats 看 picker 选了什么，不必再靠猜。
+    _EVIDENCE_FIRST_STATS["last_raw_head"] = raw_text[:120]
+    _EVIDENCE_FIRST_STATS["picks"].append(list(picked))
+    if not picked:
+        _EVIDENCE_FIRST_STATS["degraded"] += 1
+        return [], False
+    _EVIDENCE_FIRST_STATS["picked"] += 1
+    return picked, True
+
+
 class RagChain:
     """替代 LCEL 链：持有 history / custom_prompt，invoke(question) 走 向量召回→重排→生成。"""
 
@@ -1333,6 +1444,19 @@ class RagChain:
                 "\n9. 段首的 [n] 是该段编号：引用时必须在句末原样写出 [n]。"
                 "即使用正文里已经写了论文名或页码，也不能用它替代 [n] 标注。"
             )
+        # D2 证据前置（默认关）：只注入「预选编号」提示，不改 context 顺序与 [n] 编号。
+        # 解析失败/空集不计提示，按现有单段链路走（降级计数见 evidence_first_stats）。
+        picked, ev_ok = select_evidence_blocks(question, docs)
+        if ev_ok and picked:
+            # 措辞必须非排他：7B 会把「优先依据」当成「只看这些」（冒烟 Q3 实证）。
+            rules += (
+                "\n\n【证据提示】以下段落较可能包含回答所需的原文：%s。"
+                "这只是提示，不是范围限制：仍须通读全部 %d 段，"
+                "若证据出现在其他段落，照常引用真正包含它的 [n]；"
+                "不得因为某段未列在上面就忽略它。"
+                % ("、".join("[%d]" % i for i in picked), len(docs))
+            )
+
         if self.custom_prompt and self.custom_prompt.strip():
             rules = f"""{rules}
 
